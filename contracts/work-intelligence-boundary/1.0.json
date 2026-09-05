@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aftergraph.dev/contracts/work-intelligence-boundary/1.0.json",
+  "title": "Work Intelligence V2 ⇄ Trust Gateway Boundary Contract",
+  "description": "Defines the only legitimate ways a Work Intelligence observation/work-item may cross into operator-facing or execution surfaces. WI is a detection layer: it detects, observes, and proposes — it possesses NO implicit execution authority. Trust Gateway is the operator-facing policy/control plane and MUST refuse to auto-execute anything originating from WI.",
+  "version": "1.0",
+  "properties": {
+    "layer_roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["work_intelligence", "trust_gateway", "works_execution"],
+      "properties": {
+        "work_intelligence": {
+          "type": "string",
+          "enum": ["detection/observation/proposal-only"],
+          "description": "WI may only detect, observe, and propose. It never executes."
+        },
+        "trust_gateway": {
+          "type": "string",
+          "enum": ["operator-facing policy/control plane"],
+          "description": "TG mediates operator policy. It must not auto-execute WI proposals."
+        },
+        "works_execution": {
+          "type": "string",
+          "enum": ["execution + evidence authority"],
+          "description": "Only WORKS may execute. It accepts work-items ONLY via explicit, gated promotion."
+        }
+      }
+    },
+    "work_intelligence_proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposal_version", "kind", "source", "observed_at", "tenant_id", "body"],
+      "properties": {
+        "proposal_version": { "const": "1.0" },
+        "kind": { "const": "detection-proposal" },
+        "source": { "type": "string", "minLength": 1 },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "tenant_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "body": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["summary", "observations"],
+          "properties": {
+            "summary": { "type": "string", "minLength": 1 },
+            "observations": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["id", "text", "detected_at"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "text": { "type": "string", "minLength": 1 },
+                  "detected_at": { "type": "string", "format": "date-time" }
+                }
+              }
+            }
+          }
+        },
+        "authority_declaration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["execution_authority", "promotion_required", "human_review_required"],
+          "properties": {
+            "execution_authority": { "const": "none" },
+            "promotion_required": { "const": true },
+            "human_review_required": { "const": true }
+          }
+        }
+      }
+    },
+    "admission_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["admission_version", "proposal_ref", "admitted_at", "decision", "policy_ref"],
+      "properties": {
+        "admission_version": { "const": "1.0" },
+        "proposal_ref": { "type": "string" },
+        "admitted_at": { "type": "string", "format": "date-time" },
+        "decision": { "type": "string", "enum": ["admitted-for-observation", "rejected", "deferred"] },
+        "policy_ref": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "boundary_invariants": [
+    "WI possesses NO implicit execution authority: every execution path from a WI work-item requires explicit promotion gated by tenant policy (allow_works=True), work-item state APPROVED, and human review (require_approval_for_promotion=True by default).",
+    "TG MUST NOT auto-execute WI output: any WI proposal crossing into TG enters exclusively through an explicit admission surface producing an admission_record with decision=admitted-for-observation; anything else is rejected by default.",
+    "Detection results never mutate operator state implicitly: publishing to a destination requires an explicit publish action with receipt, and the destination must be in TenantPolicy.allowed_destinations.",
+    "The canonical work-item is strictly separate from executable WORKS Work objects: the engine never auto-promotes."
+  ]
+}

@@ -12,5 +12,6 @@ dist/
 __pycache__/
 .venv/
 *.json
+!contracts/work-intelligence-boundary/1.0.json
 logs/
 20260905_*
