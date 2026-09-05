@@ -119,6 +119,12 @@ class PromoteRequest(BaseModel):
     reason: str = Field(default="", max_length=2048)
 
 
+class BulkStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    work_item_ids: list[str] = Field(min_length=1, max_length=100)
+    tenant_id: str = Field(min_length=1, max_length=128)
+
+
 def create_app(
     db_path: str | Path = "./aftergraph-work-intelligence.db",
     api_token: str | None = None,
@@ -504,15 +510,10 @@ def create_app(
             "count": len(results[:limit]),
         }
 
-    class BulkStatusRequest(BaseModel):
-        model_config = ConfigDict(extra="forbid")
-        work_item_ids: list[str] = Field(min_length=1, max_length=100)
-        tenant_id: str = Field(min_length=1, max_length=128)
-
     @router.post("/work-items/bulk-status", dependencies=[Depends(auth)])
     def bulk_status(
-        payload: BulkStatusRequest,
         request: Request,
+        payload: BulkStatusRequest,
     ):
         """Get status of multiple work items."""
         store: SQLiteStore = request.app.state.store
