@@ -65,6 +65,8 @@ OpenAPI is available at `http://127.0.0.1:8087/docs`.
 | `POST` | `/v1/work-items/{id}/publish?tenant_id=...` | Publish to a configured destination |
 | `GET` | `/v1/work-items/{id}/evidence?tenant_id=...` | Provenance/evidence envelope |
 | `GET` | `/v1/metrics` | Observability counters |
+| `GET` | `/v1/monitoring` | System metrics (CPU, memory, disk) |
+| `GET` | `/v1/version` | Version and feature flags |
 
 ## Authentication
 
@@ -124,7 +126,7 @@ The envelope is HMAC-SHA256 over the canonical `(tenant_id, work_item_id, title,
 ## Development
 
 ```bash
-pytest -q          # 135 tests
+pytest -q          # 136 tests
 ```
 
 The test suite is TDD-first: every V2 module has a failing test before implementation, and the end-to-end tests run the full canonical path against in-process RenOS/WORKS fakes (real HTTP, no mocks as final evidence).
