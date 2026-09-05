@@ -222,6 +222,28 @@ class SQLiteStore:
             ).fetchall()
         return [self._work_item(row) for row in rows]
 
+    def count_open_work_items(self, tenant_id: str) -> int:
+        with self._lock:
+            row = self._db.execute(
+                """
+                SELECT COUNT(*) AS n FROM intake_work_items
+                WHERE tenant_id = ? AND status NOT IN ('DONE', 'CANCELLED')
+                """,
+                (tenant_id,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def get_work_item_by_canonical_key(self, tenant_id: str, canonical_key: str) -> WorkItem | None:
+        with self._lock:
+            row = self._db.execute(
+                """
+                SELECT * FROM intake_work_items
+                WHERE tenant_id = ? AND canonical_key = ?
+                """,
+                (tenant_id, canonical_key),
+            ).fetchone()
+        return self._work_item(row) if row else None
+
     def list_work_items(self, tenant_id: str, limit: int = 100) -> list[WorkItem]:
         with self._lock:
             rows = self._db.execute(

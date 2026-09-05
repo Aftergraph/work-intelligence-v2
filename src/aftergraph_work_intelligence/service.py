@@ -11,14 +11,33 @@ from .models import (
     WorkItemDetail,
     utc_now,
 )
+from .policy import PolicyStore
 from .store import SQLiteStore
 
 
 class WorkIntelligenceService:
-    def __init__(self, store: SQLiteStore, extractor: RuleExtractor | None = None, dedupe_threshold: float = 0.72):
+    def __init__(
+        self,
+        store: SQLiteStore,
+        extractor: RuleExtractor | None = None,
+        dedupe_threshold: float = 0.72,
+        policy_store: PolicyStore | None = None,
+    ):
         self.store = store
         self.extractor = extractor or RuleExtractor()
-        self.dedupe_threshold = dedupe_threshold
+        self.default_dedupe_threshold = dedupe_threshold
+        self.policy_store = policy_store or PolicyStore()
+
+    @property
+    def policy_store(self) -> PolicyStore:
+        return self._policy_store
+
+    @policy_store.setter
+    def policy_store(self, value: PolicyStore) -> None:
+        self._policy_store = value
+
+    def _dedupe_threshold(self, tenant_id: str) -> float:
+        return self.policy_store.get(tenant_id).dedupe_threshold or self.default_dedupe_threshold
 
     def ingest(self, payload: ObservationInput) -> IngestResult:
         tenant_id = payload.tenant_id.strip()
@@ -30,6 +49,8 @@ class WorkIntelligenceService:
             raise ValueError("source is required")
         if not text:
             raise ValueError("text is required")
+
+        policy = self.policy_store.get(tenant_id)
 
         if payload.external_id:
             replay = self.store.get_observation_by_external(tenant_id, source, payload.external_id)
@@ -51,6 +72,10 @@ class WorkIntelligenceService:
         )
         self.store.create_observation(observation)
 
+        # Source allowlist gate
+        if not policy.allows_source(source):
+            return IngestResult(action="observed", observation=observation, work_item=None)
+
         normalized_payload = ObservationInput(
             tenant_id=tenant_id,
             source=source,
@@ -62,24 +87,48 @@ class WorkIntelligenceService:
             title_hint=payload.title_hint,
             owner_hint=payload.owner_hint,
             due_hint=payload.due_hint,
-            priority_hint=payload.priority_hint,
+            priority_hint=policy.cap_priority(payload.priority_hint) if payload.priority_hint else None,
         )
         candidate = self.extractor.extract(normalized_payload)
         if candidate is None:
             return IngestResult(action="observed", observation=observation, work_item=None)
 
-        existing = self._resolve(tenant_id, candidate.canonical_key, candidate.canonical_tokens)
+        # Auto-create gate
+        if not policy.auto_create_work_items:
+            return IngestResult(action="observed", observation=observation, work_item=None)
+
+        # Quota gate — count only OPEN work-items per tenant
+        if policy.max_work_items > 0:
+            existing_open = self.store.count_open_work_items(tenant_id)
+            existing_key = self.store.get_work_item_by_canonical_key(tenant_id, candidate.canonical_key)
+            if existing_key is None and existing_open >= policy.max_work_items:
+                return IngestResult(action="observed", observation=observation, work_item=None)
+
+        existing = self._resolve(
+            tenant_id,
+            candidate.canonical_key,
+            candidate.canonical_tokens,
+            threshold=self._dedupe_threshold(tenant_id),
+        )
         if existing is not None:
-            merged = self.store.merge_work_item(existing, candidate, observation.id, updated_at=now)
+            # Apply priority cap to the merged candidate
+            capped_priority = policy.cap_priority(candidate.priority)
+            capped_candidate = (
+                candidate
+                if capped_priority == candidate.priority
+                else _replace_candidate_priority(candidate, capped_priority)
+            )
+            merged = self.store.merge_work_item(existing, capped_candidate, observation.id, updated_at=now)
             return IngestResult(action="merged", observation=observation, work_item=merged)
 
+        capped_priority = policy.cap_priority(candidate.priority)
         item = WorkItem(
             id=f"wi_{uuid.uuid4().hex}",
             tenant_id=tenant_id,
             title=candidate.title,
             summary=candidate.summary,
             status="OPEN",
-            priority=candidate.priority,
+            priority=capped_priority,
             owner=candidate.owner,
             due_hint=candidate.due_hint,
             next_action=candidate.next_action,
@@ -93,14 +142,21 @@ class WorkIntelligenceService:
         self.store.create_work_item(item, observation.id)
         return IngestResult(action="created", observation=observation, work_item=item)
 
-    def _resolve(self, tenant_id: str, canonical_key: str, canonical_tokens: tuple[str, ...]) -> WorkItem | None:
+    def _resolve(
+        self,
+        tenant_id: str,
+        canonical_key: str,
+        canonical_tokens: tuple[str, ...],
+        threshold: float | None = None,
+    ) -> WorkItem | None:
+        threshold = threshold if threshold is not None else self.default_dedupe_threshold
         best: WorkItem | None = None
         best_score = 0.0
         for item in self.store.list_open_work_items(tenant_id):
             if item.canonical_key == canonical_key:
                 return item
             score = self.extractor.similarity(canonical_tokens, item.canonical_tokens)
-            if score >= self.dedupe_threshold and score > best_score:
+            if score >= threshold and score > best_score:
                 best = item
                 best_score = score
         return best
@@ -120,3 +176,9 @@ class WorkIntelligenceService:
             observations=self.store.observations_for_work_item(work_item_id),
             publications=self.store.publications_for_work_item(work_item_id),
         )
+
+
+def _replace_candidate_priority(candidate, new_priority: str):
+    from dataclasses import replace
+
+    return replace(candidate, priority=new_priority)
