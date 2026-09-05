@@ -457,7 +457,7 @@ class GitHubAdapter(SourceAdapter):
             return
         if action not in ("opened", "closed", "reopened"):
             return
-        labels = [l.get("name") for l in (issue.get("labels") or []) if l.get("name")]
+        labels = [label.get("name") for label in (issue.get("labels") or []) if label.get("name")]
         priority = "high" if "bug" in labels else "medium"
         yield ObservationInput(
             tenant_id=tenant_id,

@@ -6,10 +6,8 @@ canonical ObservationInput instances — never WorkItems directly.
 """
 from __future__ import annotations
 
-import pytest
 
 from aftergraph_work_intelligence.adapters import GitHubAdapter, SourceAdapter
-from aftergraph_work_intelligence.models import ObservationInput
 
 
 def _push_payload(**overrides):
