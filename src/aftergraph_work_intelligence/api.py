@@ -74,28 +74,40 @@ import hmac as _hmac
 
 
 def _fire_webhooks(app_state, event: str, payload: dict) -> None:
-    """Fire registered webhooks for an event (best-effort, non-blocking)."""
+    """Fire registered webhooks for an event (best-effort, non-blocking via thread)."""
     webhooks = getattr(app_state, "webhooks", {})
     if not webhooks:
         return
+    targets = []
     for wh in webhooks.values():
         if not wh.get("active", True):
             continue
         if event not in wh.get("events", []):
             continue
-        url = wh["url"]
-        secret = wh.get("secret")
-        body = json.dumps({"event": event, "data": payload}).encode()
-        headers = {"Content-Type": "application/json"}
-        if secret:
-            sig = _hmac.new(secret.encode(), body, _hashlib.sha256).hexdigest()
-            headers["X-Webhook-Signature"] = f"sha256={sig}"
-        try:
-            import urllib.request
-            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            urllib.request.urlopen(req, timeout=5)
-        except Exception:
-            pass  # Best-effort, don't fail the request
+        targets.append(wh)
+    if not targets:
+        return
+
+    def _deliver():
+        for wh in targets:
+            url = wh["url"]
+            secret = wh.get("secret")
+            body = json.dumps({"event": event, "data": payload}).encode()
+            headers = {"Content-Type": "application/json"}
+            if secret:
+                sig = _hmac.new(secret.encode(), body, _hashlib.sha256).hexdigest()
+                headers["X-Webhook-Signature"] = f"sha256={sig}"
+            for attempt in range(3):
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+                    urllib.request.urlopen(req, timeout=5)
+                    break
+                except Exception:
+                    if attempt < 2:
+                        time.sleep(0.5 * (attempt + 1))
+
+    _threading.Thread(target=_deliver, daemon=True).start()
 
 
 class RateLimiter:
