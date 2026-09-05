@@ -107,6 +107,18 @@ CREATE TABLE IF NOT EXISTS tenant_policies (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_prefix
+ON api_keys(prefix);
 """
 
 
@@ -240,6 +252,47 @@ class SQLiteStore:
                 (tenant_id,),
             )
             return cursor.rowcount > 0
+
+    def create_api_key(self, key_id: str, name: str, key_hash: str, prefix: str) -> dict:
+        """Create an API key record."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """INSERT INTO api_keys (id, name, key_hash, prefix, active, created_at)
+                   VALUES (?, ?, ?, ?, 1, ?)""",
+                (key_id, name, key_hash, prefix, now),
+            )
+        return {"id": key_id, "name": name, "prefix": prefix, "active": True, "created_at": now}
+
+    def list_api_keys(self) -> list[dict]:
+        """Return all API key records (without secrets)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, name, prefix, active, created_at, last_used_at FROM api_keys ORDER BY created_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def deactivate_api_key(self, key_id: str) -> bool:
+        """Deactivate an API key. Returns True if it existed."""
+        with self._lock:
+            cursor = self._db.execute(
+                "UPDATE api_keys SET active = 0 WHERE id = ?", (key_id,)
+            )
+            return cursor.rowcount > 0
+
+    def validate_api_key(self, prefix: str) -> bool:
+        """Check if an API key prefix is active."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT active FROM api_keys WHERE prefix = ?", (prefix,)
+            ).fetchone()
+            if row is None or not row["active"]:
+                return False
+            self._db.execute(
+                "UPDATE api_keys SET last_used_at = ? WHERE prefix = ?",
+                (datetime.now(timezone.utc).isoformat(), prefix),
+            )
+            return True
 
     def create_observation(self, observation: Observation) -> None:
         with self._lock:

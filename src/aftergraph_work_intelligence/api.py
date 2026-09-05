@@ -68,6 +68,36 @@ def setup_logging():
 logger = logging.getLogger("aftergraph.work-intelligence")
 
 
+import threading as _threading
+import hashlib as _hashlib
+import hmac as _hmac
+
+
+def _fire_webhooks(app_state, event: str, payload: dict) -> None:
+    """Fire registered webhooks for an event (best-effort, non-blocking)."""
+    webhooks = getattr(app_state, "webhooks", {})
+    if not webhooks:
+        return
+    for wh in webhooks.values():
+        if not wh.get("active", True):
+            continue
+        if event not in wh.get("events", []):
+            continue
+        url = wh["url"]
+        secret = wh.get("secret")
+        body = json.dumps({"event": event, "data": payload}).encode()
+        headers = {"Content-Type": "application/json"}
+        if secret:
+            sig = _hmac.new(secret.encode(), body, _hashlib.sha256).hexdigest()
+            headers["X-Webhook-Signature"] = f"sha256={sig}"
+        try:
+            import urllib.request
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            urllib.request.urlopen(req, timeout=5)
+        except Exception:
+            pass  # Best-effort, don't fail the request
+
+
 class RateLimiter:
     def __init__(self, requests_per_minute: int = 60):
         self.requests_per_minute = requests_per_minute
@@ -253,13 +283,15 @@ def create_app(
         }
 
     @router.post("/observations", dependencies=[Depends(auth)])
-    def ingest_observation(payload: ObservationRequest, svc: WorkIntelligenceService = Depends(service)):
+    def ingest_observation(payload: ObservationRequest, request: Request, svc: WorkIntelligenceService = Depends(service)):
         try:
             result = svc.ingest(ObservationInput(**payload.model_dump()))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         status = 201 if result.action == "created" else 202 if result.action == "observed" else 200
-        return JSONResponse(status_code=status, content=jsonable_encoder(asdict(result)))
+        encoded = jsonable_encoder(asdict(result))
+        _fire_webhooks(request.app.state, "observation.ingested", encoded)
+        return JSONResponse(status_code=status, content=encoded)
 
     @router.get("/work-items", dependencies=[Depends(auth)])
     def list_work_items(
@@ -305,7 +337,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="work item not found") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return jsonable_encoder(asdict(item))
+        result = jsonable_encoder(asdict(item))
+        _fire_webhooks(request.app.state, f"work_item.{payload.action}", result)
+        return result
 
     @router.post("/work-items/{work_item_id}/promote", dependencies=[Depends(auth)])
     def promote_work_item(
@@ -323,7 +357,9 @@ def create_app(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return jsonable_encoder(asdict(item))
+        result = jsonable_encoder(asdict(item))
+        _fire_webhooks(request.app.state, "work_item.promoted", result)
+        return result
 
     @router.post("/work-items/{work_item_id}/publish", status_code=201, dependencies=[Depends(auth)])
     def publish_work_item(
