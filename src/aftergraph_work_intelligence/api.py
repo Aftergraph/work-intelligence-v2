@@ -824,6 +824,72 @@ def create_app(
             "uptime_seconds": 0,  # Would need to track startup time
         }
 
+
+    # --- Dashboard ---
+    @app.get("/dashboard")
+    def dashboard(request: Request):
+        """Simple HTML dashboard showing work item overview."""
+        from fastapi.responses import HTMLResponse
+        store: SQLiteStore = request.app.state.store
+
+        # Gather stats
+        with store._lock:
+            total_obs = store._db.execute("SELECT COUNT(*) FROM intake_observations").fetchone()[0]
+            total_wi = store._db.execute("SELECT COUNT(*) FROM intake_work_items").fetchone()[0]
+            by_status = store._db.execute(
+                "SELECT status, COUNT(*) FROM intake_work_items GROUP BY status"
+            ).fetchall()
+            by_tenant = store._db.execute(
+                "SELECT tenant_id, COUNT(*) FROM intake_work_items GROUP BY tenant_id"
+            ).fetchall()
+            by_priority = store._db.execute(
+                "SELECT priority, COUNT(*) FROM intake_work_items GROUP BY priority"
+            ).fetchall()
+            total_pubs = store._db.execute("SELECT COUNT(*) FROM intake_publications").fetchone()[0]
+
+        status_rows = "".join(f"<tr><td>{r[0]}</td><td>{r[1]}</td></tr>" for r in by_status)
+        tenant_rows = "".join(f"<tr><td>{r[0]}</td><td>{r[1]}</td></tr>" for r in by_tenant)
+        priority_rows = "".join(f"<tr><td>{r[0]}</td><td>{r[1]}</td></tr>" for r in by_priority)
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aftergraph Work Intelligence - Dashboard</title>
+<style>
+  body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #f8f9fa; color: #212529; }}
+  h1 {{ color: #1a1a2e; border-bottom: 3px solid #e94560; padding-bottom: 10px; }}
+  .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin: 20px 0; }}
+  .stat {{ background: white; border-radius: 8px; padding: 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+  .stat .number {{ font-size: 2em; font-weight: bold; color: #e94560; }}
+  .stat .label {{ color: #6c757d; margin-top: 4px; }}
+  table {{ width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 16px 0; }}
+  th {{ background: #1a1a2e; color: white; padding: 12px; text-align: left; }}
+  td {{ padding: 10px 12px; border-bottom: 1px solid #dee2e6; }}
+  h2 {{ color: #1a1a2e; margin-top: 30px; }}
+  .footer {{ color: #6c757d; font-size: 0.9em; margin-top: 30px; padding-top: 10px; border-top: 1px solid #dee2e6; }}
+</style>
+</head>
+<body>
+<h1>Aftergraph Work Intelligence</h1>
+<div class="stats">
+  <div class="stat"><div class="number">{total_obs}</div><div class="label">Observations</div></div>
+  <div class="stat"><div class="number">{total_wi}</div><div class="label">Work Items</div></div>
+  <div class="stat"><div class="number">{total_pubs}</div><div class="label">Publications</div></div>
+  <div class="stat"><div class="number">{len(by_tenant)}</div><div class="label">Tenants</div></div>
+</div>
+<h2>By Status</h2>
+<table><tr><th>Status</th><th>Count</th></tr>{status_rows}</table>
+<h2>By Tenant</h2>
+<table><tr><th>Tenant</th><th>Count</th></tr>{tenant_rows}</table>
+<h2>By Priority</h2>
+<table><tr><th>Priority</th><th>Count</th></tr>{priority_rows}</table>
+<div class="footer">Aftergraph Work Intelligence V2 | API: <a href="/docs">/docs</a></div>
+</body></html>"""
+        return HTMLResponse(content=html)
+
+
     # --- Webhook Management ---
     @router.post("/webhooks", status_code=201, dependencies=[Depends(auth)])
     def register_webhook(
