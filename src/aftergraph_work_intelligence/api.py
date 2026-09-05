@@ -420,6 +420,121 @@ def create_app(
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
 
+
+    @router.get("/tenants", dependencies=[Depends(auth)])
+    def list_tenants(request: Request):
+        """List all tenants with work item counts."""
+        store: SQLiteStore = request.app.state.store
+        with store._lock:
+            rows = store._db.execute(
+                "SELECT tenant_id, COUNT(*) as cnt FROM intake_work_items GROUP BY tenant_id ORDER BY tenant_id"
+            ).fetchall()
+        tenants = [
+            {"tenant_id": row[0], "work_item_count": row[1]}
+            for row in rows
+        ]
+        return {"tenants": tenants, "count": len(tenants)}
+
+    @router.get("/work-items/{work_item_id}/transitions", dependencies=[Depends(auth)])
+    def get_transitions(
+        work_item_id: str,
+        request: Request,
+        tenant_id: str = Query(min_length=1, max_length=128),
+    ):
+        """Get transition history for a work item."""
+        store: SQLiteStore = request.app.state.store
+        item = store.get_work_item(work_item_id, tenant_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="work item not found")
+        transitions = store.list_transitions(work_item_id)
+        return {
+            "work_item_id": work_item_id,
+            "transitions": [
+                {
+                    "id": t.id,
+                    "from_status": t.from_state,
+                    "to_status": t.to_state,
+                    "action": "approve" if t.to_state == "APPROVED" else t.to_state.lower(),
+                    "actor": t.actor,
+                    "reason": t.reason,
+                    "created_at": t.at.isoformat() if t.at else None,
+                }
+                for t in transitions
+            ],
+            "count": len(transitions),
+        }
+
+    @router.get("/work-items/{work_item_id}/publications", dependencies=[Depends(auth)])
+    def get_publications(
+        work_item_id: str,
+        request: Request,
+        tenant_id: str = Query(min_length=1, max_length=128),
+    ):
+        """Get publication history for a work item."""
+        store: SQLiteStore = request.app.state.store
+        item = store.get_work_item(work_item_id, tenant_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="work item not found")
+        publications = store.publications_for_work_item(work_item_id)
+        return {
+            "work_item_id": work_item_id,
+            "publications": jsonable_encoder([asdict(p) for p in publications]),
+            "count": len(publications),
+        }
+
+    @router.get("/search", dependencies=[Depends(auth)])
+    def search_work_items(
+        q: str = Query(min_length=1, max_length=256),
+        tenant_id: str = Query(min_length=1, max_length=128),
+        limit: int = Query(default=50, ge=1, le=500),
+        request: Request = None,
+    ):
+        """Search work items by title or summary."""
+        svc: WorkIntelligenceService = request.app.state.service
+        items = svc.list_work_items(tenant_id, limit=1000)
+        # Simple text search in title and summary
+        results = [
+            item for item in items
+            if q.lower() in (item.title or "").lower() or q.lower() in (item.summary or "").lower()
+        ]
+        return {
+            "query": q,
+            "tenant_id": tenant_id,
+            "results": jsonable_encoder([asdict(item) for item in results[:limit]]),
+            "count": len(results[:limit]),
+        }
+
+    class BulkStatusRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        work_item_ids: list[str] = Field(min_length=1, max_length=100)
+        tenant_id: str = Field(min_length=1, max_length=128)
+
+    @router.post("/work-items/bulk-status", dependencies=[Depends(auth)])
+    def bulk_status(
+        payload: BulkStatusRequest,
+        request: Request,
+    ):
+        """Get status of multiple work items."""
+        store: SQLiteStore = request.app.state.store
+        items = []
+        for item_id in payload.work_item_ids:
+            item = store.get_work_item(item_id, payload.tenant_id)
+            if item is None:
+                items.append({
+                    "id": item_id,
+                    "status": "NOT_FOUND",
+                    "title": None,
+                    "priority": None,
+                })
+            else:
+                items.append({
+                    "id": item.id,
+                    "status": item.status,
+                    "title": item.title,
+                    "priority": item.priority,
+                })
+        return {"items": items, "count": len(items)}
+
     app.include_router(router)
     return app
 
