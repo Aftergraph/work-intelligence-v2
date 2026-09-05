@@ -144,7 +144,7 @@ class TestPersistentPolicyStorage:
         p = policies[0]
         assert p["tenant_id"] == "full-tenant"
         assert set(p["allowed_sources"]) == {"conversation", "email", "calendar"}
-        assert p["allowed_destinations"] == ["renos", "works"]
+        assert set(p["allowed_destinations"]) == {"renos", "works"}
         assert p["max_work_items"] == 200
         assert p["max_priority"] == "critical"
         assert p["allow_works"] is True
