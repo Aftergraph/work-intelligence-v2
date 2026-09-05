@@ -31,6 +31,7 @@ from .service import WorkIntelligenceService
 from .tasks import create_task_queue, TaskStatus
 from .audit import AuditLog
 from .cache import Cache, app_cache
+from .request_logger import RequestLogger
 from .exceptions import WorkIntelligenceError
 from .migrations import run_migrations
 from .store import SQLiteStore
@@ -282,6 +283,11 @@ def create_app(
         # Initialize cache
         cache = Cache(default_ttl=300, max_size=5000)
         app.state.cache = cache
+
+        # Initialize request logger
+        log_dir = db_path.parent / "logs"
+        request_logger = RequestLogger(log_dir=log_dir)
+        app.state.request_logger = request_logger
 
         try:
             yield
@@ -1406,6 +1412,20 @@ Production-grade observation → WorkItem inference engine.
         audit: AuditLog = request.app.state.audit_log
         audit.record("api_key.revoked", actor="bearer", target=f"key:{key_id}")
         return {"status": "revoked", "id": key_id}
+
+    # --- Request Logs ---
+    @router.get("/logs", dependencies=[Depends(auth)])
+    def get_request_logs(request: Request, limit: int = Query(100, ge=1, le=1000)):
+        """Get recent request logs."""
+        logger: RequestLogger = request.app.state.request_logger
+        return {"logs": logger.get_recent_logs(limit)}
+
+    @router.post("/logs/cleanup", dependencies=[Depends(auth)])
+    def cleanup_logs(request: Request):
+        """Clean up old log files."""
+        logger: RequestLogger = request.app.state.request_logger
+        removed = logger.cleanup_old_logs()
+        return {"removed": removed}
 
     # --- Response Time Stats ---
     @router.get("/response-times", dependencies=[Depends(auth)])
