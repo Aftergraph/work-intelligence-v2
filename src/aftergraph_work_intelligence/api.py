@@ -291,7 +291,28 @@ def create_app(
     app = FastAPI(
         title="Aftergraph Work Intelligence",
         version="0.2.0",
-        description="Source-neutral observation → WorkItem inference, resolution, provenance, review, publication, and optional WORKS promotion.",
+        description="""## Aftergraph Work Intelligence V2
+
+Production-grade observation → WorkItem inference engine.
+
+### Authentication
+- **Bearer token**: `Authorization: Bearer <token>` (full admin access)
+- **API key**: `X-API-Key: ak_<key>` (read/write access)
+
+### Key Features
+- **Observation ingestion**: Submit observations from any source
+- **Automatic resolution**: Deduplication and merge across sources
+- **Policy enforcement**: Per-tenant rules for auto-promotion, allowed sources
+- **Review workflow**: OPEN → APPROVED → PUBLISHED lifecycle
+- **Evidence chain**: HMAC-SHA256 provenance for every work item
+- **Webhook delivery**: Async with retries and HMAC signatures
+- **Background tasks**: Async processing with worker pool
+
+### Rate Limiting
+- Global: 60 requests/minute (configurable)
+- Per-key: Custom limits via `/v1/rate-limit`
+- Per-endpoint: Custom limits per API endpoint
+""",
         lifespan=lifespan,
     )
     # Add GZip compression
