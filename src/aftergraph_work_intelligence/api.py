@@ -109,6 +109,14 @@ def _fire_webhooks(app_state, event: str, payload: dict) -> None:
 
     _threading.Thread(target=_deliver, daemon=True).start()
 
+    # Broadcast to WebSocket clients (best-effort)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(broadcast_update(event, payload))
+    except Exception:
+        pass
+
 
 class RateLimiter:
     def __init__(self, requests_per_minute: int = 60):
@@ -959,6 +967,37 @@ def create_app(
 </body></html>"""
         return HTMLResponse(content=html)
 
+
+    # --- WebSocket for real-time updates ---
+    import asyncio
+
+    ws_clients: set = set()
+
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket):
+        """WebSocket for real-time dashboard updates."""
+        await websocket.accept()
+        ws_clients.add(websocket)
+        try:
+            while True:
+                data = await websocket.receive_text()
+                if data == "ping":
+                    await websocket.send_text("pong")
+        except Exception:
+            ws_clients.discard(websocket)
+
+    async def broadcast_update(event: str, data: dict):
+        """Broadcast update to all connected WebSocket clients."""
+        if not ws_clients:
+            return
+        message = json.dumps({"event": event, "data": data})
+        dead = set()
+        for ws in ws_clients:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                dead.add(ws)
+        ws_clients -= dead
 
     # --- Webhook Management ---
     @router.post("/webhooks", status_code=201, dependencies=[Depends(auth)])
