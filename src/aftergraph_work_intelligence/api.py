@@ -30,6 +30,7 @@ from .publishers import Publisher, publisher_from_env
 from .service import WorkIntelligenceService
 from .tasks import create_task_queue, TaskStatus
 from .audit import AuditLog
+from .migrations import run_migrations
 from .store import SQLiteStore
 from .transitions import TransitionEngine
 
@@ -232,6 +233,10 @@ def create_app(
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SQLiteStore(db_path)
         app.state.store = store
+
+        # Run pending migrations (use store's connection for :memory: support)
+        migration_result = run_migrations(connection=store._db)
+        app.state.migration_version = migration_result["current_version"]
         app.state.service = WorkIntelligenceService(store, policy_store=configured_policy_store)
         app.state.policy_store = configured_policy_store
         app.state.transitions = TransitionEngine(store, policy_store=configured_policy_store)
@@ -1281,6 +1286,21 @@ def create_app(
         audit: AuditLog = request.app.state.audit_log
         audit.record("api_key.revoked", actor="bearer", target=f"key:{key_id}")
         return {"status": "revoked", "id": key_id}
+
+    # --- Database Migrations ---
+    @router.get("/migrations", dependencies=[Depends(auth)])
+    def migrations_status(request: Request):
+        """Get database migration status."""
+        version = getattr(request.app.state, "migration_version", 0)
+        return {"current_version": version}
+
+    @router.post("/migrations/run", dependencies=[Depends(auth)])
+    def run_migrations_endpoint(request: Request):
+        """Run pending migrations."""
+        store: SQLiteStore = request.app.state.store
+        result = run_migrations(connection=store._db)
+        request.app.state.migration_version = result["current_version"]
+        return result
 
     # --- Audit Trail ---
     @router.get("/audit", dependencies=[Depends(auth)])
