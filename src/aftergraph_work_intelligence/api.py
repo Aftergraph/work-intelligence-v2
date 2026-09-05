@@ -331,11 +331,30 @@ def create_app(
     
     router = APIRouter(prefix="/v1")
 
-    def auth(authorization: str | None = Header(default=None)) -> None:
-        if not configured_token:
+    def auth(
+        request: Request,
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    ) -> None:
+        """Authenticate via Bearer token OR API key. Returns auth context."""
+        # Bearer token (master token)
+        if configured_token and authorization == f"Bearer {configured_token}":
+            request.state.auth_method = "bearer"
+            request.state.auth_scopes = ["admin", "read", "write", "delete"]
             return
-        if authorization != f"Bearer {configured_token}":
-            raise HTTPException(status_code=401, detail="invalid or missing bearer token")
+
+        # API key authentication
+        if x_api_key and x_api_key.startswith("ak_"):
+            prefix = x_api_key[:12]
+            store: SQLiteStore = request.app.state.store
+            if store.validate_api_key(prefix):
+                request.state.auth_method = "api_key"
+                request.state.auth_scopes = ["read", "write"]
+                return
+
+        # No valid auth
+        if configured_token:
+            raise HTTPException(status_code=401, detail="invalid or missing credentials")
 
     def service(request: Request) -> WorkIntelligenceService:
         return request.app.state.service
