@@ -452,8 +452,22 @@ def create_app(
             stats = queue.get_stats()
             checks["task_queue"] = "ok"
             checks["tasks_pending"] = str(stats.get("pending", 0))
+            checks["tasks_running"] = str(stats.get("running", 0))
         except Exception:
             checks["task_queue"] = "unavailable"
+
+        # Cache check
+        try:
+            cache = request.app.state.cache
+            cache_stats = cache.stats()
+            checks["cache"] = "ok"
+            checks["cache_size"] = str(cache_stats.get("size", 0))
+            checks["cache_hits"] = str(cache_stats.get("hits", 0))
+        except Exception:
+            checks["cache"] = "unavailable"
+
+        # Migration version
+        checks["migration_version"] = str(getattr(request.app.state, "migration_version", 0))
 
         return checks
 
