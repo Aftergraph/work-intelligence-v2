@@ -117,26 +117,53 @@ def _fire_webhooks(app_state, event: str, payload: dict) -> None:
     except Exception:
         pass
 
+    # Track delivery stats
+    stats = getattr(app_state, "webhook_stats", {"delivered": 0, "failed": 0})
+    stats["delivered"] += 1
+    app_state.webhook_stats = stats
+
 
 class RateLimiter:
     def __init__(self, requests_per_minute: int = 60):
-        self.requests_per_minute = requests_per_minute
+        self.default_limit = requests_per_minute
         self.requests: dict[str, list[float]] = defaultdict(list)
-    
+        self.key_limits: dict[str, int] = {}  # per-key overrides
+
+    def set_key_limit(self, key: str, limit: int) -> None:
+        """Set a custom rate limit for a specific key."""
+        self.key_limits[key] = limit
+
+    def get_limit(self, key: str) -> int:
+        """Get the rate limit for a key."""
+        return self.key_limits.get(key, self.default_limit)
+
     def is_allowed(self, client_id: str) -> bool:
         now = time.time()
         window_start = now - 60
-        
+
         # Clean old requests
         self.requests[client_id] = [t for t in self.requests[client_id] if t > window_start]
-        
+
         # Check limit
-        if len(self.requests[client_id]) >= self.requests_per_minute:
+        limit = self.get_limit(client_id)
+        if len(self.requests[client_id]) >= limit:
             return False
-        
+
         # Record new request
         self.requests[client_id].append(now)
         return True
+
+    def get_usage(self, client_id: str) -> dict:
+        """Get current usage stats for a client."""
+        now = time.time()
+        window_start = now - 60
+        self.requests[client_id] = [t for t in self.requests[client_id] if t > window_start]
+        limit = self.get_limit(client_id)
+        return {
+            "used": len(self.requests[client_id]),
+            "limit": limit,
+            "remaining": max(0, limit - len(self.requests[client_id])),
+        }
 
 
 class ObservationRequest(BaseModel):
@@ -245,6 +272,7 @@ def create_app(
     # Add usage tracking
     usage_stats = {"requests": 0, "by_path": defaultdict(int), "by_status": defaultdict(int), "errors": 0}
     app.state.usage_stats = usage_stats
+    app.state.rate_limiter = rate_limiter
 
     # Add request logging middleware
     @app.middleware("http")
@@ -274,8 +302,12 @@ def create_app(
     
     # Add rate limiting middleware
     @app.middleware("http")
-    async def rate_limit(request: Request, call_next):
+    async def rate_limit_middleware(request: Request, call_next):
         client_id = request.client.host if request.client else "unknown"
+        # Skip rate limiting for management/health endpoints
+        skip_paths = {"/health", "/v1/rate-limit", "/v1/metrics", "/v1/webhooks/stats", "/docs", "/openapi.json"}
+        if request.url.path in skip_paths:
+            return await call_next(request)
         if not rate_limiter.is_allowed(client_id):
             return JSONResponse(
                 status_code=429,
@@ -475,6 +507,32 @@ def create_app(
             "by_path": dict(stats.get("by_path", {})),
             "by_status": dict(stats.get("by_status", {})),
         }
+
+    @router.get("/webhooks/stats", dependencies=[Depends(auth)])
+    def webhook_stats(request: Request):
+        """Get webhook delivery statistics."""
+        stats = getattr(request.app.state, "webhook_stats", {"delivered": 0, "failed": 0})
+        webhooks = getattr(request.app.state, "webhooks", {})
+        return {
+            "delivery": stats,
+            "registered": len(webhooks),
+            "active": sum(1 for wh in webhooks.values() if wh.get("active", True)),
+        }
+
+    @router.get("/rate-limit", dependencies=[Depends(auth)])
+    def rate_limit_status(request: Request, client_id: str = Query(None)):
+        """Check rate limit status for a client or API key."""
+        limiter: RateLimiter = request.app.state.rate_limiter
+        if client_id:
+            return limiter.get_usage(client_id)
+        return {"default_limit": limiter.default_limit, "key_count": len(limiter.key_limits)}
+
+    @router.post("/rate-limit", dependencies=[Depends(auth)])
+    def set_rate_limit(request: Request, key: str = Body(...), limit: int = Body(..., ge=1, le=10000)):
+        """Set a custom rate limit for an API key."""
+        limiter: RateLimiter = request.app.state.rate_limiter
+        limiter.set_key_limit(key, limit)
+        return {"key": key, "limit": limit, "updated": True}
 
     @router.get("/metrics", dependencies=[Depends(auth)])
     def metrics(request: Request):
