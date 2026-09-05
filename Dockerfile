@@ -1,22 +1,29 @@
-FROM python:3.13-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    AFTERGRAPH_HOST=0.0.0.0 \
-    AFTERGRAPH_PORT=8087 \
-    AFTERGRAPH_DB=/data/work-intelligence.db
+FROM python:3.11-slim
 
 WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy dependency files
 COPY pyproject.toml README.md ./
-COPY src ./src
-RUN pip install --no-cache-dir .
 
-RUN useradd --create-home --uid 10001 aftergraph && mkdir -p /data && chown -R aftergraph:aftergraph /data /app
-USER aftergraph
+# Install Python dependencies
+RUN pip install --no-cache-dir -e ".[dev]"
 
-EXPOSE 8087
-VOLUME ["/data"]
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8087/healthz', timeout=2).read()"
+# Copy source code
+COPY src/ ./src/
+COPY tests/ ./tests/
+COPY openapi.json ./
 
-CMD ["aftergraph-work-intelligence", "--host", "0.0.0.0", "--port", "8087", "--db", "/data/work-intelligence.db"]
+# Expose port
+EXPOSE 8299
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8299/healthz')" || exit 1
+
+# Run API
+CMD ["uvicorn", "aftergraph_work_intelligence.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8299"]

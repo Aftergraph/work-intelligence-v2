@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  # PostgreSQL database
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_PASSWORD: devpass
+      POSTGRES_DB: renos
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # RenOS Control Operations API
+  renos-ops:
+    image: node:22-bookworm-slim
+    working_dir: /src
+    volumes:
+      - ../Renos-Control/backend/operations:/src
+    command: sh -c "npm ci --omit=dev && node server.mjs"
+    environment:
+      DATABASE_URL: postgresql://postgres:devpass@postgres:5432/renos
+      PORT: "8788"
+      HOST: "0.0.0.0"
+    ports:
+      - "8788:8788"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Work Intelligence V2 API (optional)
+  work-intelligence:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8299:8299"
+    environment:
+      DB_PATH: /data/aftergraph.db
+    volumes:
+      - widata:/data
+    depends_on:
+      - renos-ops
+
+volumes:
+  pgdata:
+  widata:
