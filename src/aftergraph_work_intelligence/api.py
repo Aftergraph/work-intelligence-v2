@@ -294,6 +294,19 @@ def create_app(
     app.state.usage_stats = usage_stats
     app.state.rate_limiter = rate_limiter
 
+    # Request size limiting middleware
+    MAX_REQUEST_SIZE = int(os.getenv("AFTERGRAPH_MAX_REQUEST_SIZE", "10485760"))  # 10MB default
+
+    @app.middleware("http")
+    async def limit_request_size(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_REQUEST_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"Request too large. Max size: {MAX_REQUEST_SIZE} bytes"},
+            )
+        return await call_next(request)
+
     # Enhanced request logging middleware
     response_times: dict[str, list[float]] = defaultdict(list)
 
