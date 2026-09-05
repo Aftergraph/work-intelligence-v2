@@ -33,6 +33,7 @@ from .audit import AuditLog
 from .cache import Cache, app_cache
 from .request_logger import RequestLogger
 from .body_log import BodyLoggingMiddleware
+from .tracing import setup_tracing
 from .exceptions import WorkIntelligenceError
 from .migrations import run_migrations
 from .store import SQLiteStore
@@ -339,6 +340,9 @@ Production-grade observation → WorkItem inference engine.
                 "error_type": exc.__class__.__name__,
             },
         )
+
+    # Setup OpenTelemetry tracing
+    setup_tracing(app)
 
     # Add CORS middleware
     app.add_middleware(
