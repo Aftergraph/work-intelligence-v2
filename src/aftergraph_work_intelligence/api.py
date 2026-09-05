@@ -12,8 +12,10 @@ from typing import Any
 import uvicorn
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+import uuid
 
 from .evidence import build_evidence
 from .metrics import MetricsRecorder
@@ -97,6 +99,24 @@ def create_app(
         description="Source-neutral observation → WorkItem inference, resolution, provenance, review, publication, and optional WORKS promotion.",
         lifespan=lifespan,
     )
+    # Add CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # Add request ID middleware
+    @app.middleware("http")
+    async def add_request_id(request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    
     router = APIRouter(prefix="/v1")
 
     def auth(authorization: str | None = Header(default=None)) -> None:
@@ -248,6 +268,15 @@ def create_app(
         }
         envelope = build_evidence(payload, secret=request.app.state.evidence_secret)
         return jsonable_encoder(envelope)
+
+    @router.get("/version", dependencies=[Depends(auth)])
+    def version() -> dict:
+        return {
+            "version": "0.2.0",
+            "build": "production",
+            "status": "active",
+            "features": ["adapters", "policies", "transitions", "publishers", "evidence", "metrics"]
+        }
 
     @router.get("/metrics", dependencies=[Depends(auth)])
     def metrics(request: Request):

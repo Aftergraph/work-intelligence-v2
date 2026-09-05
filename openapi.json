@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Aftergraph Work Intelligence",
-    "description": "Source-neutral observation → WorkItem inference, resolution, provenance, review, publication, and optional WORKS promotion.",
+    "description": "Source-neutral observation \u2192 WorkItem inference, resolution, provenance, review, publication, and optional WORKS promotion.",
     "version": "0.2.0"
   },
   "paths": {
@@ -483,6 +483,54 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/version": {
+      "get": {
+        "summary": "Version",
+        "operationId": "version_v1_version_get",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Version V1 Version Get"
+                }
               }
             }
           },
