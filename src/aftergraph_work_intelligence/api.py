@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import os
+import sys
 import time
 import uuid
 from collections import defaultdict
@@ -27,6 +30,37 @@ from .publishers import Publisher, publisher_from_env
 from .service import WorkIntelligenceService
 from .store import SQLiteStore
 from .transitions import TransitionEngine
+
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        log_data = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
+        }
+        if record.exc_info:
+            log_data["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_data)
+
+
+def setup_logging():
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JSONFormatter())
+    
+    logging.root.handlers = [handler]
+    logging.root.setLevel(logging.INFO)
+    
+    # Silence noisy loggers
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+
+
+logger = logging.getLogger("aftergraph.work-intelligence")
 
 
 class RateLimiter:
@@ -103,6 +137,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        setup_logging()
+        logger.info("Starting Aftergraph Work Intelligence V2", extra={"version": "0.2.0"})
         db_path.parent.mkdir(parents=True, exist_ok=True)
         store = SQLiteStore(db_path)
         app.state.store = store
@@ -131,6 +167,25 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    # Add request logging middleware
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        start_time = time.time()
+        response = await call_next(request)
+        duration = time.time() - start_time
+        
+        logger.info(
+            "Request processed",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": round(duration * 1000, 2),
+                "client": request.client.host if request.client else "unknown",
+            }
+        )
+        return response
     
     # Add rate limiting middleware
     @app.middleware("http")
