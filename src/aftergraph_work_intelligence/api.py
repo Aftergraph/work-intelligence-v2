@@ -32,6 +32,7 @@ from .tasks import create_task_queue, TaskStatus
 from .audit import AuditLog
 from .cache import Cache, app_cache
 from .request_logger import RequestLogger
+from .body_log import BodyLoggingMiddleware
 from .exceptions import WorkIntelligenceError
 from .migrations import run_migrations
 from .store import SQLiteStore
@@ -348,6 +349,14 @@ Production-grade observation → WorkItem inference engine.
         allow_headers=["*"],
     )
 
+    # Body logging middleware (configurable via env)
+    app.add_middleware(
+        BodyLoggingMiddleware,
+        log_request_body=os.getenv("AFTERGRAPH_LOG_REQUEST_BODY", "false").lower() == "true",
+        log_response_body=os.getenv("AFTERGRAPH_LOG_RESPONSE_BODY", "false").lower() == "true",
+        max_chars=int(os.getenv("AFTERGRAPH_BODY_LOG_MAX_CHARS", "1000")),
+    )
+
     # API version header middleware
     @app.middleware("http")
     async def add_version_headers(request: Request, call_next):
@@ -384,8 +393,6 @@ Production-grade observation → WorkItem inference engine.
         return await call_next(request)
 
     # Enhanced request logging middleware
-    response_times: dict[str, list[float]] = defaultdict(list)
-
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         start_time = time.time()
@@ -402,9 +409,12 @@ Production-grade observation → WorkItem inference engine.
 
         # Track response times
         path_key = request.url.path
-        response_times[path_key].append(duration)
-        if len(response_times[path_key]) > 1000:
-            response_times[path_key] = response_times[path_key][-500:]
+        # Ensure response_times dict exists on app.state (needed for test isolation)
+        if not hasattr(app.state, "response_times"):
+            app.state.response_times = defaultdict(list)
+        app.state.response_times[path_key].append(duration)
+        if len(app.state.response_times[path_key]) > 1000:
+            app.state.response_times[path_key] = app.state.response_times[path_key][-500:]
 
         # Structured log
         logger.info(
@@ -1459,7 +1469,8 @@ Production-grade observation → WorkItem inference engine.
     def response_time_stats(request: Request):
         """Get response time statistics per endpoint."""
         stats = {}
-        for path, times in response_times.items():
+        rt = getattr(request.app.state, "response_times", defaultdict(list))
+        for path, times in rt.items():
             if times:
                 sorted_times = sorted(times)
                 stats[path] = {
