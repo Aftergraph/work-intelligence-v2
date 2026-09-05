@@ -29,6 +29,7 @@ from .policy import PolicyStore, TenantPolicy
 from .publishers import Publisher, publisher_from_env
 from .service import WorkIntelligenceService
 from .tasks import create_task_queue, TaskStatus
+from .audit import AuditLog
 from .store import SQLiteStore
 from .transitions import TransitionEngine
 
@@ -240,6 +241,10 @@ def create_app(
         # Initialize background task queue
         task_queue = create_task_queue()
         app.state.task_queue = task_queue
+
+        # Initialize audit log
+        audit_log = AuditLog(max_entries=50000)
+        app.state.audit_log = audit_log
 
         try:
             yield
@@ -1211,6 +1216,10 @@ def create_app(
         store: SQLiteStore = request.app.state.store
         record = store.create_api_key(key_id, name, key_hash, prefix)
 
+        # Audit log
+        audit: AuditLog = request.app.state.audit_log
+        audit.record("api_key.created", actor="bearer", target=f"key:{key_id}", details={"name": name})
+
         return {
             "id": key_id,
             "name": name,
@@ -1249,6 +1258,10 @@ def create_app(
         key_hash = hashlib.sha256(api_key.encode()).hexdigest()
         store.create_api_key(new_key_id, old_key["name"], key_hash, prefix)
 
+        # Audit log
+        audit: AuditLog = request.app.state.audit_log
+        audit.record("api_key.rotated", actor="bearer", target=f"key:{key_id}", details={"new_id": new_key_id})
+
         return {
             "old_id": key_id,
             "new_id": new_key_id,
@@ -1264,7 +1277,29 @@ def create_app(
         store: SQLiteStore = request.app.state.store
         if not store.deactivate_api_key(key_id):
             raise HTTPException(status_code=404, detail="API key not found")
+        # Audit log
+        audit: AuditLog = request.app.state.audit_log
+        audit.record("api_key.revoked", actor="bearer", target=f"key:{key_id}")
         return {"status": "revoked", "id": key_id}
+
+    # --- Audit Trail ---
+    @router.get("/audit", dependencies=[Depends(auth)])
+    def audit_query(
+        request: Request,
+        event: str | None = Query(None),
+        actor: str | None = Query(None),
+        target: str | None = Query(None),
+        limit: int = Query(100, ge=1, le=1000),
+    ):
+        """Query audit log entries."""
+        audit: AuditLog = request.app.state.audit_log
+        return {"entries": audit.query(event=event, actor=actor, target=target, limit=limit)}
+
+    @router.get("/audit/stats", dependencies=[Depends(auth)])
+    def audit_stats(request: Request):
+        """Get audit log statistics."""
+        audit: AuditLog = request.app.state.audit_log
+        return {"total_entries": audit.count()}
 
     app.include_router(router)
     return app
