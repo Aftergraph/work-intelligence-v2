@@ -168,6 +168,15 @@ def create_app(
         allow_headers=["*"],
     )
     
+    # Add timing middleware
+    @app.middleware("http")
+    async def add_timing(request: Request, call_next):
+        start_time = time.time()
+        response = await call_next(request)
+        duration = time.time() - start_time
+        response.headers["X-Process-Time"] = str(round(duration * 1000, 2))
+        return response
+    
     # Add request logging middleware
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
@@ -220,7 +229,13 @@ def create_app(
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
-        return {"status": "ok", "service": "aftergraph-work-intelligence", "version": "0.2.0"}
+        return {
+            "status": "ok",
+            "service": "aftergraph-work-intelligence",
+            "version": "0.2.0",
+            "api_version": "v1",
+            "build": "production"
+        }
 
     @router.post("/observations", dependencies=[Depends(auth)])
     def ingest_observation(payload: ObservationRequest, svc: WorkIntelligenceService = Depends(service)):
