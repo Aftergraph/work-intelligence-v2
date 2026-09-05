@@ -159,6 +159,10 @@ def create_app(
         description="Source-neutral observation → WorkItem inference, resolution, provenance, review, publication, and optional WORKS promotion.",
         lifespan=lifespan,
     )
+    # Add GZip compression
+    from fastapi.middleware.gzip import GZipMiddleware
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
+    
     # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
