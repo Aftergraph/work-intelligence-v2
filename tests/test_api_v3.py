@@ -111,3 +111,23 @@ class TestMonitoring:
         # Check service metrics
         assert "service" in data
         assert "timestamp" in data
+
+    def test_monitoring_system_metrics_valid_ranges(self, client: TestClient):
+        resp = client.get("/v1/monitoring")
+        assert resp.status_code == 200
+        data = resp.json()
+        
+        # CPU should be 0-100%
+        assert 0 <= data["system"]["cpu_percent"] <= 100
+        
+        # Memory should be 0-100%
+        assert 0 <= data["system"]["memory_percent"] <= 100
+        
+        # Disk should be 0-100%
+        assert 0 <= data["system"]["disk_percent"] <= 100
+        
+        # Memory used should be <= total
+        assert data["system"]["memory_used_gb"] <= data["system"]["memory_total_gb"]
+        
+        # Disk used should be <= total
+        assert data["system"]["disk_used_gb"] <= data["system"]["disk_total_gb"]
