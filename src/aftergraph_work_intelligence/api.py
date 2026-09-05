@@ -291,6 +291,14 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # API version header middleware
+    @app.middleware("http")
+    async def add_version_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-API-Version"] = "v1"
+        response.headers["X-App-Version"] = "0.2.0"
+        return response
     
     # Add timing middleware
     @app.middleware("http")
