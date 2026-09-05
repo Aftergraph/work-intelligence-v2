@@ -234,13 +234,24 @@ def create_app(
         response.headers["X-Process-Time"] = str(round(duration * 1000, 2))
         return response
     
+    # Add usage tracking
+    usage_stats = {"requests": 0, "by_path": defaultdict(int), "by_status": defaultdict(int), "errors": 0}
+    app.state.usage_stats = usage_stats
+
     # Add request logging middleware
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         start_time = time.time()
         response = await call_next(request)
         duration = time.time() - start_time
-        
+
+        # Track usage
+        usage_stats["requests"] += 1
+        usage_stats["by_path"][request.url.path] += 1
+        usage_stats["by_status"][str(response.status_code)] += 1
+        if response.status_code >= 400:
+            usage_stats["errors"] += 1
+
         logger.info(
             "Request processed",
             extra={
@@ -444,6 +455,17 @@ def create_app(
             "build": "production",
             "status": "active",
             "features": ["adapters", "policies", "transitions", "publishers", "evidence", "metrics"]
+        }
+
+    @router.get("/usage", dependencies=[Depends(auth)])
+    def usage(request: Request):
+        """API usage statistics."""
+        stats = getattr(request.app.state, "usage_stats", {})
+        return {
+            "total_requests": stats.get("requests", 0),
+            "total_errors": stats.get("errors", 0),
+            "by_path": dict(stats.get("by_path", {})),
+            "by_status": dict(stats.get("by_status", {})),
         }
 
     @router.get("/metrics", dependencies=[Depends(auth)])
