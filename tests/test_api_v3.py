@@ -90,3 +90,24 @@ class TestHealthz:
         assert data["status"] == "ok"
         assert data["service"] == "aftergraph-work-intelligence"
         assert data["version"] == "0.2.0"
+
+
+class TestMonitoring:
+    def test_monitoring_returns_system_metrics(self, client: TestClient):
+        resp = client.get("/v1/monitoring")
+        assert resp.status_code == 200
+        data = resp.json()
+        
+        # Check system metrics
+        assert "system" in data
+        assert "cpu_percent" in data["system"]
+        assert "memory_percent" in data["system"]
+        assert "memory_used_gb" in data["system"]
+        assert "memory_total_gb" in data["system"]
+        assert "disk_percent" in data["system"]
+        assert "disk_used_gb" in data["system"]
+        assert "disk_total_gb" in data["system"]
+        
+        # Check service metrics
+        assert "service" in data
+        assert "timestamp" in data

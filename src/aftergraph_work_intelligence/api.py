@@ -373,6 +373,34 @@ def create_app(
         recorder: MetricsRecorder = request.app.state.metrics
         return jsonable_encoder(recorder.snapshot())
 
+    @router.get("/monitoring", dependencies=[Depends(auth)])
+    def monitoring(request: Request):
+        """Comprehensive monitoring endpoint with system metrics."""
+        import psutil
+        recorder: MetricsRecorder = request.app.state.metrics
+        
+        # System metrics
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+        
+        # Service metrics
+        service_metrics = recorder.snapshot()
+        
+        return {
+            "system": {
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory.percent,
+                "memory_used_gb": round(memory.used / (1024**3), 2),
+                "memory_total_gb": round(memory.total / (1024**3), 2),
+                "disk_percent": disk.percent,
+                "disk_used_gb": round(disk.used / (1024**3), 2),
+                "disk_total_gb": round(disk.total / (1024**3), 2),
+            },
+            "service": service_metrics,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+
     app.include_router(router)
     return app
 
