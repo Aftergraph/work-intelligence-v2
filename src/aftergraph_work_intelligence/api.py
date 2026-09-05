@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
@@ -25,6 +27,27 @@ from .publishers import Publisher, publisher_from_env
 from .service import WorkIntelligenceService
 from .store import SQLiteStore
 from .transitions import TransitionEngine
+
+
+class RateLimiter:
+    def __init__(self, requests_per_minute: int = 60):
+        self.requests_per_minute = requests_per_minute
+        self.requests: dict[str, list[float]] = defaultdict(list)
+    
+    def is_allowed(self, client_id: str) -> bool:
+        now = time.time()
+        window_start = now - 60
+        
+        # Clean old requests
+        self.requests[client_id] = [t for t in self.requests[client_id] if t > window_start]
+        
+        # Check limit
+        if len(self.requests[client_id]) >= self.requests_per_minute:
+            return False
+        
+        # Record new request
+        self.requests[client_id].append(now)
+        return True
 
 
 class ObservationRequest(BaseModel):
@@ -76,6 +99,7 @@ def create_app(
     configured_evidence_secret = evidence_secret if evidence_secret is not None else os.getenv(
         "AFTERGRAPH_EVIDENCE_SECRET", "aftergraph-work-intelligence"
     )
+    rate_limiter = RateLimiter(requests_per_minute=int(os.getenv("AFTERGRAPH_RATE_LIMIT", "60")))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -107,6 +131,17 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    
+    # Add rate limiting middleware
+    @app.middleware("http")
+    async def rate_limit(request: Request, call_next):
+        client_id = request.client.host if request.client else "unknown"
+        if not rate_limiter.is_allowed(client_id):
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded. Try again later."}
+            )
+        return await call_next(request)
     
     # Add request ID middleware
     @app.middleware("http")
