@@ -289,6 +289,9 @@ def create_app(
         request_logger = RequestLogger(log_dir=log_dir)
         app.state.request_logger = request_logger
 
+        # Store migration version for health check
+        app.state.migration_version = migration_result["current_version"]
+
         try:
             yield
         finally:
@@ -1249,19 +1252,43 @@ Production-grade observation → WorkItem inference engine.
     import asyncio
 
     ws_clients: set = set()
+    ws_last_heartbeat: dict = {}  # client -> timestamp
+
+    async def ws_heartbeat_loop():
+        """Send heartbeat pings to all connected clients every 30s."""
+        while True:
+            await asyncio.sleep(30)
+            now = time.time()
+            disconnected = []
+            for client in list(ws_clients):
+                try:
+                    await client.send_json({"type": "heartbeat", "timestamp": now})
+                    ws_last_heartbeat[id(client)] = now
+                except Exception:
+                    disconnected.append(client)
+            for client in disconnected:
+                ws_clients.discard(client)
+                ws_last_heartbeat.pop(id(client), None)
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket):
-        """WebSocket for real-time dashboard updates."""
+        """WebSocket for real-time dashboard updates with heartbeat."""
         await websocket.accept()
         ws_clients.add(websocket)
+        ws_last_heartbeat[id(websocket)] = time.time()
         try:
             while True:
                 data = await websocket.receive_text()
                 if data == "ping":
-                    await websocket.send_text("pong")
+                    await websocket.send_json({"type": "pong", "timestamp": time.time()})
+                elif data == "stats":
+                    await websocket.send_json({
+                        "type": "stats",
+                        "connected_clients": len(ws_clients),
+                    })
         except Exception:
             ws_clients.discard(websocket)
+            ws_last_heartbeat.pop(id(websocket), None)
 
     async def broadcast_update(event: str, data: dict):
         """Broadcast update to all connected WebSocket clients."""
