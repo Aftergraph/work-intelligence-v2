@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,19 @@ CREATE TABLE IF NOT EXISTS intake_publications (
 );
 CREATE INDEX IF NOT EXISTS idx_intake_publications_work
 ON intake_publications(work_item_id, published_at DESC);
+
+CREATE TABLE IF NOT EXISTS intake_replays (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    observation_id TEXT NOT NULL,
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_intake_replays_tenant
+ON intake_replays(tenant_id, at ASC);
+CREATE INDEX IF NOT EXISTS idx_intake_replays_external
+ON intake_replays(tenant_id, source, external_id);
 
 CREATE TABLE IF NOT EXISTS intake_transitions (
     id TEXT PRIMARY KEY,
@@ -317,6 +331,24 @@ class SQLiteStore:
                     publication.external_id,
                     json.dumps(publication.response, ensure_ascii=False, sort_keys=True),
                     _iso(publication.published_at),
+                ),
+            )
+
+    def record_replay(self, tenant_id: str, source: str, external_id: str, observation_id: str, at) -> None:
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO intake_replays
+                (id, tenant_id, source, external_id, observation_id, at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"replay_{uuid.uuid4().hex}",
+                    tenant_id,
+                    source,
+                    external_id,
+                    observation_id,
+                    _iso(at),
                 ),
             )
 

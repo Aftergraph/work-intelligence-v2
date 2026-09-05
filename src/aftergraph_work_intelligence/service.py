@@ -56,6 +56,7 @@ class WorkIntelligenceService:
             replay = self.store.get_observation_by_external(tenant_id, source, payload.external_id)
             if replay is not None:
                 item = self.store.get_work_item_for_observation(replay.id)
+                self.store.record_replay(tenant_id, source, payload.external_id, replay.id, utc_now())
                 return IngestResult(action="replayed", observation=replay, work_item=item)
 
         now = utc_now()
