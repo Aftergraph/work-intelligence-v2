@@ -50,6 +50,11 @@ class TenantPolicy:
     #: defaults to False — promotion is always opt-in.
     allow_works: bool = False
 
+    #: Set of destination names (lowercased) the tenant may publish to. None =
+    #: all configured destinations allowed (operator's responsibility to keep
+    #: this sane). An empty set means NO destinations allowed.
+    allowed_destinations: set[str] | None = None
+
     #: Whether approved-by-human is required before promotion. Even if
     #: ``allow_works=True``, the work-item must have been reviewed.
     require_approval_for_promotion: bool = True
@@ -65,6 +70,11 @@ class TenantPolicy:
         if not self.allowed_sources:
             return True
         return source.casefold() in {s.casefold() for s in self.allowed_sources}
+
+    def allows_destination(self, destination: str) -> bool:
+        if self.allowed_destinations is None:
+            return True
+        return destination.casefold() in {d.casefold() for d in self.allowed_destinations}
 
 
 @dataclass(slots=True)
