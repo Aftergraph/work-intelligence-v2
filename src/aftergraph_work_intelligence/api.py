@@ -30,6 +30,7 @@ from .publishers import Publisher, publisher_from_env
 from .service import WorkIntelligenceService
 from .tasks import create_task_queue, TaskStatus
 from .audit import AuditLog
+from .cache import Cache, app_cache
 from .migrations import run_migrations
 from .store import SQLiteStore
 from .transitions import TransitionEngine
@@ -250,6 +251,10 @@ def create_app(
         # Initialize audit log
         audit_log = AuditLog(max_entries=50000)
         app.state.audit_log = audit_log
+
+        # Initialize cache
+        cache = Cache(default_ttl=300, max_size=5000)
+        app.state.cache = cache
 
         try:
             yield
@@ -1286,6 +1291,29 @@ def create_app(
         audit: AuditLog = request.app.state.audit_log
         audit.record("api_key.revoked", actor="bearer", target=f"key:{key_id}")
         return {"status": "revoked", "id": key_id}
+
+    # --- Cache Management ---
+    @router.get("/cache/stats", dependencies=[Depends(auth)])
+    def cache_stats(request: Request):
+        """Get cache statistics."""
+        cache: Cache = request.app.state.cache
+        return cache.stats()
+
+    @router.post("/cache/clear", dependencies=[Depends(auth)])
+    def cache_clear(request: Request):
+        """Clear all cache entries."""
+        cache: Cache = request.app.state.cache
+        cleared = cache.clear()
+        return {"cleared": cleared, "status": "ok"}
+
+    @router.delete("/cache/{key}", dependencies=[Depends(auth)])
+    def cache_delete(request: Request, key: str):
+        """Delete a specific cache entry."""
+        cache: Cache = request.app.state.cache
+        deleted = cache.delete(key)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Cache key not found")
+        return {"deleted": key}
 
     # --- Database Migrations ---
     @router.get("/migrations", dependencies=[Depends(auth)])
