@@ -124,7 +124,7 @@ The envelope is HMAC-SHA256 over the canonical `(tenant_id, work_item_id, title,
 ## Development
 
 ```bash
-pytest -q          # 64 tests
+pytest -q          # 135 tests
 ```
 
 The test suite is TDD-first: every V2 module has a failing test before implementation, and the end-to-end tests run the full canonical path against in-process RenOS/WORKS fakes (real HTTP, no mocks as final evidence).
