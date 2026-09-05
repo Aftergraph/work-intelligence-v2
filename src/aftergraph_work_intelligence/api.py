@@ -294,10 +294,13 @@ def create_app(
     app.state.usage_stats = usage_stats
     app.state.rate_limiter = rate_limiter
 
-    # Add request logging middleware
+    # Enhanced request logging middleware
+    response_times: dict[str, list[float]] = defaultdict(list)
+
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         start_time = time.time()
+        request_size = int(request.headers.get("content-length", 0))
         response = await call_next(request)
         duration = time.time() - start_time
 
@@ -307,6 +310,24 @@ def create_app(
         usage_stats["by_status"][str(response.status_code)] += 1
         if response.status_code >= 400:
             usage_stats["errors"] += 1
+
+        # Track response times
+        path_key = request.url.path
+        response_times[path_key].append(duration)
+        if len(response_times[path_key]) > 1000:
+            response_times[path_key] = response_times[path_key][-500:]
+
+        # Structured log
+        logger.info(
+            "Request processed",
+            extra={
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+                "duration_ms": round(duration * 1000, 2),
+                "request_size": request_size,
+            },
+        )
 
         logger.info(
             "Request processed",
@@ -1291,6 +1312,24 @@ def create_app(
         audit: AuditLog = request.app.state.audit_log
         audit.record("api_key.revoked", actor="bearer", target=f"key:{key_id}")
         return {"status": "revoked", "id": key_id}
+
+    # --- Response Time Stats ---
+    @router.get("/response-times", dependencies=[Depends(auth)])
+    def response_time_stats(request: Request):
+        """Get response time statistics per endpoint."""
+        stats = {}
+        for path, times in response_times.items():
+            if times:
+                sorted_times = sorted(times)
+                stats[path] = {
+                    "count": len(times),
+                    "avg_ms": round(sum(times) / len(times) * 1000, 2),
+                    "p50_ms": round(sorted_times[len(sorted_times) // 2] * 1000, 2),
+                    "p95_ms": round(sorted_times[int(len(sorted_times) * 0.95)] * 1000, 2),
+                    "p99_ms": round(sorted_times[int(len(sorted_times) * 0.99)] * 1000, 2),
+                    "max_ms": round(max(times) * 1000, 2),
+                }
+        return stats
 
     # --- Cache Management ---
     @router.get("/cache/stats", dependencies=[Depends(auth)])
