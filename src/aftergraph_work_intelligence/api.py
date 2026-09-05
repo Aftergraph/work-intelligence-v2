@@ -31,6 +31,7 @@ from .service import WorkIntelligenceService
 from .tasks import create_task_queue, TaskStatus
 from .audit import AuditLog
 from .cache import Cache, app_cache
+from .exceptions import WorkIntelligenceError
 from .migrations import run_migrations
 from .store import SQLiteStore
 from .transitions import TransitionEngine
@@ -271,6 +272,17 @@ def create_app(
     from fastapi.middleware.gzip import GZipMiddleware
     app.add_middleware(GZipMiddleware, minimum_size=1000)
     
+    # Global exception handler for custom exceptions
+    @app.exception_handler(WorkIntelligenceError)
+    async def work_intelligence_error_handler(request: Request, exc: WorkIntelligenceError):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "detail": exc.detail,
+                "error_type": exc.__class__.__name__,
+            },
+        )
+
     # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
