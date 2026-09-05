@@ -360,14 +360,33 @@ def create_app(
         return request.app.state.service
 
     @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {
+    def healthz(request: Request) -> dict[str, str]:
+        """Health check with DB + task queue status."""
+        checks = {
             "status": "ok",
             "service": "aftergraph-work-intelligence",
             "version": "0.2.0",
             "api_version": "v1",
-            "build": "production"
         }
+        # DB check
+        try:
+            store: SQLiteStore = request.app.state.store
+            store.list_api_keys()
+            checks["database"] = "ok"
+        except Exception as e:
+            checks["database"] = f"error: {e}"
+            checks["status"] = "degraded"
+
+        # Task queue check
+        try:
+            queue = request.app.state.task_queue
+            stats = queue.get_stats()
+            checks["task_queue"] = "ok"
+            checks["tasks_pending"] = str(stats.get("pending", 0))
+        except Exception:
+            checks["task_queue"] = "unavailable"
+
+        return checks
 
     @router.post("/observations", dependencies=[Depends(auth)])
     def ingest_observation(payload: ObservationRequest, request: Request, svc: WorkIntelligenceService = Depends(service)):
