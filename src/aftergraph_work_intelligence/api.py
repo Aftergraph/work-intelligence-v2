@@ -1156,54 +1156,76 @@ def create_app(
         del webhooks[webhook_id]
         return {"status": "deleted", "id": webhook_id}
 
-    # --- API Key Management ---
+    # --- API Key Management (DB-backed) ---
     @router.post("/api-keys", status_code=201, dependencies=[Depends(auth)])
     def create_api_key(
         request: Request,
         name: str = Body(..., min_length=1, max_length=128),
         permissions: list[str] = Body(default=["read"]),
     ):
-        """Create a new API key."""
+        """Create a new API key. Key is only returned once."""
+        import hashlib
         key_id = f"key_{uuid.uuid4().hex[:16]}"
         api_key = f"ak_{uuid.uuid4().hex}"
-        
-        key_info = {
+        prefix = api_key[:12]
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+        store: SQLiteStore = request.app.state.store
+        record = store.create_api_key(key_id, name, key_hash, prefix)
+
+        return {
             "id": key_id,
             "name": name,
             "key": api_key,
+            "prefix": prefix,
             "permissions": permissions,
-            "created_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": record["created_at"],
             "active": True,
+            "_warning": "Store this key securely. It will not be shown again.",
         }
-        
-        # Store in app state
-        if not hasattr(request.app.state, "api_keys"):
-            request.app.state.api_keys = {}
-        request.app.state.api_keys[key_id] = key_info
-        
-        return key_info
 
     @router.get("/api-keys", dependencies=[Depends(auth)])
     def list_api_keys(request: Request):
         """List API keys (without secrets)."""
-        api_keys = getattr(request.app.state, "api_keys", {})
-        # Return keys without the actual secret
-        safe_keys = [
-            {k: v for k, v in key.items() if k != "key"}
-            for key in api_keys.values()
-        ]
-        return {"keys": safe_keys, "count": len(safe_keys)}
+        store: SQLiteStore = request.app.state.store
+        keys = store.list_api_keys()
+        return {"keys": keys, "count": len(keys)}
+
+    @router.post("/api-keys/{key_id}/rotate", status_code=200, dependencies=[Depends(auth)])
+    def rotate_api_key(key_id: str, request: Request):
+        """Rotate an API key: deactivate old, create new."""
+        import hashlib
+        store: SQLiteStore = request.app.state.store
+        keys = store.list_api_keys()
+        old_key = next((k for k in keys if k["id"] == key_id), None)
+        if not old_key:
+            raise HTTPException(status_code=404, detail="API key not found")
+
+        # Deactivate old
+        store.deactivate_api_key(key_id)
+
+        # Create new with same name
+        new_key_id = f"key_{uuid.uuid4().hex[:16]}"
+        api_key = f"ak_{uuid.uuid4().hex}"
+        prefix = api_key[:12]
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        store.create_api_key(new_key_id, old_key["name"], key_hash, prefix)
+
+        return {
+            "old_id": key_id,
+            "new_id": new_key_id,
+            "key": api_key,
+            "prefix": prefix,
+            "name": old_key["name"],
+            "_warning": "Store this key securely. It will not be shown again.",
+        }
 
     @router.delete("/api-keys/{key_id}", dependencies=[Depends(auth)])
-    def revoke_api_key(
-        key_id: str,
-        request: Request,
-    ):
-        """Revoke an API key."""
-        api_keys = getattr(request.app.state, "api_keys", {})
-        if key_id not in api_keys:
+    def revoke_api_key(key_id: str, request: Request):
+        """Revoke (deactivate) an API key."""
+        store: SQLiteStore = request.app.state.store
+        if not store.deactivate_api_key(key_id):
             raise HTTPException(status_code=404, detail="API key not found")
-        api_keys[key_id]["active"] = False
         return {"status": "revoked", "id": key_id}
 
     app.include_router(router)
