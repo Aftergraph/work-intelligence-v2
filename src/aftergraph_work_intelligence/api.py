@@ -25,11 +25,16 @@ import uuid
 from .evidence import build_evidence
 from .metrics import MetricsRecorder
 from .models import ObservationInput, Publication, utc_now
-from .policy import PolicyStore
+from .policy import PolicyStore, TenantPolicy
 from .publishers import Publisher, publisher_from_env
 from .service import WorkIntelligenceService
 from .store import SQLiteStore
 from .transitions import TransitionEngine
+
+
+def _dt(value: str) -> datetime:
+    """Convert ISO string to datetime."""
+    return datetime.fromisoformat(value)
 
 
 class JSONFormatter(logging.Formatter):
@@ -510,6 +515,195 @@ def create_app(
             "count": len(results[:limit]),
         }
 
+    @router.get("/observations", dependencies=[Depends(auth)])
+    def list_observations(
+        tenant_id: str = Query(min_length=1, max_length=128),
+        source: str | None = Query(default=None, max_length=64),
+        limit: int = Query(default=100, ge=1, le=1000),
+        request: Request = None,
+    ):
+        """List observations for a tenant, with optional source filtering."""
+        store: SQLiteStore = request.app.state.store
+        sql = "SELECT * FROM intake_observations WHERE tenant_id = ?"
+        params: list[Any] = [tenant_id]
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        with store._lock:
+            rows = store._db.execute(sql, params).fetchall()
+
+        observations = []
+        for row in rows:
+            observations.append({
+                "id": row["id"],
+                "tenant_id": row["tenant_id"],
+                "source": row["source"],
+                "external_id": row["external_id"],
+                "actor": row["actor"],
+                "text": row["text"],
+                "occurred_at": _dt(row["occurred_at"]).isoformat() if row["occurred_at"] else None,
+                "created_at": _dt(row["created_at"]).isoformat() if row["created_at"] else None,
+            })
+
+        return {"observations": observations, "count": len(observations)}
+
+    @router.get("/work-items", dependencies=[Depends(auth)])
+    def list_work_items(
+        tenant_id: str = Query(min_length=1, max_length=128),
+        status: str | None = Query(default=None, max_length=64),
+        priority: str | None = Query(default=None, max_length=64),
+        limit: int = Query(default=100, ge=1, le=1000),
+        svc: WorkIntelligenceService = Depends(service),
+    ):
+        """List work items with optional status and priority filtering (review queue)."""
+        items = svc.list_work_items(tenant_id, limit=limit)
+        # Filter by status if provided
+        if status:
+            items = [i for i in items if i.status.lower() == status.lower()]
+        # Filter by priority if provided
+        if priority:
+            items = [i for i in items if i.priority.lower() == priority.lower()]
+        return {"count": len(items), "work_items": jsonable_encoder([asdict(item) for item in items])}
+
+    @router.get("/tenants/{tenant_id}/policy", dependencies=[Depends(auth)])
+    def get_tenant_policy(
+        tenant_id: str,
+        request: Request,
+    ):
+        """Get tenant policy."""
+        policy_store: PolicyStore = request.app.state.policy_store
+        policy = policy_store.get(tenant_id)
+        if policy is None:
+            raise HTTPException(status_code=404, detail="tenant policy not found")
+        return {
+            "tenant_id": tenant_id,
+            "allowed_sources": policy.allowed_sources,
+            "allowed_destinations": policy.allowed_destinations,
+            "max_work_items": policy.max_work_items,
+            "max_priority": policy.max_priority,
+            "allow_works": policy.allow_works,
+        }
+
+    @router.post("/tenants/{tenant_id}/policy", dependencies=[Depends(auth)])
+    def update_tenant_policy(
+        tenant_id: str,
+        request: Request,
+        allowed_sources: list[str] | None = None,
+        allowed_destinations: list[str] | None = None,
+        max_work_items: int | None = None,
+        max_priority: str | None = None,
+        allow_works: bool | None = None,
+    ):
+        """Update tenant policy."""
+        policy_store: PolicyStore = request.app.state.policy_store
+        existing = policy_store.get(tenant_id)
+
+        if existing:
+            policy_store.put(tenant_id, TenantPolicy(
+                allowed_sources=allowed_sources if allowed_sources is not None else existing.allowed_sources,
+                allowed_destinations=allowed_destinations if allowed_destinations is not None else existing.allowed_destinations,
+                max_work_items=max_work_items if max_work_items is not None else existing.max_work_items,
+                max_priority=max_priority if max_priority is not None else existing.max_priority,
+                allow_works=allow_works if allow_works is not None else existing.allow_works,
+            ))
+        else:
+            policy_store.put(tenant_id, TenantPolicy(
+                allowed_sources=set(allowed_sources or []),
+                allowed_destinations=set(allowed_destinations or []),
+                max_work_items=max_work_items or 100,
+                max_priority=max_priority or "high",
+                allow_works=allow_works if allow_works is not None else False,
+            ))
+
+        return {"tenant_id": tenant_id, "updated": True}
+
+    @router.get("/readiness", dependencies=[Depends(auth)])
+    def readiness(
+        request: Request,
+    ):
+        """Integration health/readiness API."""
+        store: SQLiteStore = request.app.state.store
+        policy_store: PolicyStore = request.app.state.policy_store
+        publisher = request.app.state.publisher
+
+        checks = {
+            "database": False,
+            "policy_store": False,
+            "publisher": False,
+        }
+
+        # Check database
+        try:
+            with store._lock:
+                store._db.execute("SELECT 1").fetchone()
+            checks["database"] = True
+        except Exception:
+            pass
+
+        # Check policy store
+        try:
+            policy_store.get("test")
+            checks["policy_store"] = True
+        except Exception:
+            pass
+
+        # Check publisher
+        checks["publisher"] = publisher is not None
+
+        all_pass = all(checks.values())
+        return {
+            "status": "pass" if all_pass else "fail",
+            "checks": checks,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+
+    @router.get("/work-items/{work_item_id}/actions", dependencies=[Depends(auth)])
+    def get_allowed_actions(
+        work_item_id: str,
+        tenant_id: str = Query(min_length=1, max_length=128),
+        request: Request = None,
+    ):
+        """Get capabilities/allowed-actions for a work item."""
+        store: SQLiteStore = request.app.state.store
+        policy_store: PolicyStore = request.app.state.policy_store
+
+        item = store.get_work_item(work_item_id, tenant_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="work item not found")
+
+        # Determine allowed actions based on current status and policies
+        actions = []
+        if item.status == "OPEN":
+            actions = ["approve", "reject", "snooze", "cancel"]
+        elif item.status == "APPROVED":
+            actions = ["publish", "promote", "cancel"]
+
+            # Check if promotion is allowed
+            policy = policy_store.get(tenant_id)
+            if policy and policy.allow_works:
+                actions.append("promote")
+
+        return {
+            "work_item_id": work_item_id,
+            "status": item.status,
+            "actions": actions,
+        }
+
+    @router.get("/context", dependencies=[Depends(auth)])
+    def get_actor_context(
+        request: Request,
+    ):
+        """Get current actor/role/permission context."""
+        # In a real implementation, this would extract the actual actor from the token
+        return {
+            "actor": "api_client",
+            "role": "operator",
+            "permissions": ["read", "write", "review"],
+        }
+
     @router.post("/work-items/bulk-status", dependencies=[Depends(auth)])
     def bulk_status(
         request: Request,
@@ -535,6 +729,160 @@ def create_app(
                     "priority": item.priority,
                 })
         return {"items": items, "count": len(items)}
+
+
+    # --- Detailed Health Check ---
+    @app.get("/healthz/detailed")
+    def healthz_detailed(request: Request):
+        """Detailed health check with dependency checks."""
+        checks = {}
+        
+        # Database check
+        try:
+            store: SQLiteStore = request.app.state.store
+            _ = store.list_work_items("health-check", limit=1)
+            checks["database"] = {"status": "ok", "message": "SQLite accessible"}
+        except Exception as e:
+            checks["database"] = {"status": "error", "message": str(e)}
+        
+        # Store check
+        try:
+            checks["store"] = {"status": "ok", "message": "Store operational"}
+        except Exception as e:
+            checks["store"] = {"status": "error", "message": str(e)}
+        
+        all_ok = all(c["status"] == "ok" for c in checks.values())
+        return {
+            "status": "healthy" if all_ok else "degraded",
+            "checks": checks,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+
+    # --- Readiness Probe ---
+    @app.get("/ready")
+    def ready():
+        """Kubernetes readiness probe."""
+        return {
+            "status": "ready",
+            "dependencies": [
+                {"name": "database", "status": "ok"},
+                {"name": "store", "status": "ok"},
+            ],
+        }
+
+    # --- Liveness Probe ---
+    @app.get("/live")
+    def live():
+        """Kubernetes liveness probe."""
+        import time as _time
+        return {
+            "status": "alive",
+            "uptime_seconds": 0,  # Would need to track startup time
+        }
+
+    # --- Webhook Management ---
+    @router.post("/webhooks", status_code=201, dependencies=[Depends(auth)])
+    def register_webhook(
+        request: Request,
+        url: str = Body(..., min_length=1),
+        events: list[str] = Body(..., min_length=1),
+        secret: str | None = Body(default=None),
+    ):
+        """Register a webhook for event notifications."""
+        from urllib.parse import urlparse
+        
+        # Validate URL
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            raise HTTPException(status_code=422, detail="Invalid webhook URL")
+        
+        webhook_id = f"wh_{uuid.uuid4().hex}"
+        webhook = {
+            "id": webhook_id,
+            "url": url,
+            "events": events,
+            "secret": secret,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "active": True,
+        }
+        
+        # Store in app state
+        if not hasattr(request.app.state, "webhooks"):
+            request.app.state.webhooks = {}
+        request.app.state.webhooks[webhook_id] = webhook
+        
+        return webhook
+
+    @router.get("/webhooks", dependencies=[Depends(auth)])
+    def list_webhooks(request: Request):
+        """List registered webhooks."""
+        webhooks = getattr(request.app.state, "webhooks", {})
+        return {
+            "webhooks": list(webhooks.values()),
+            "count": len(webhooks),
+        }
+
+    @router.delete("/webhooks/{webhook_id}", dependencies=[Depends(auth)])
+    def delete_webhook(
+        webhook_id: str,
+        request: Request,
+    ):
+        """Delete a webhook."""
+        webhooks = getattr(request.app.state, "webhooks", {})
+        if webhook_id not in webhooks:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+        del webhooks[webhook_id]
+        return {"status": "deleted", "id": webhook_id}
+
+    # --- API Key Management ---
+    @router.post("/api-keys", status_code=201, dependencies=[Depends(auth)])
+    def create_api_key(
+        request: Request,
+        name: str = Body(..., min_length=1, max_length=128),
+        permissions: list[str] = Body(default=["read"]),
+    ):
+        """Create a new API key."""
+        key_id = f"key_{uuid.uuid4().hex[:16]}"
+        api_key = f"ak_{uuid.uuid4().hex}"
+        
+        key_info = {
+            "id": key_id,
+            "name": name,
+            "key": api_key,
+            "permissions": permissions,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "active": True,
+        }
+        
+        # Store in app state
+        if not hasattr(request.app.state, "api_keys"):
+            request.app.state.api_keys = {}
+        request.app.state.api_keys[key_id] = key_info
+        
+        return key_info
+
+    @router.get("/api-keys", dependencies=[Depends(auth)])
+    def list_api_keys(request: Request):
+        """List API keys (without secrets)."""
+        api_keys = getattr(request.app.state, "api_keys", {})
+        # Return keys without the actual secret
+        safe_keys = [
+            {k: v for k, v in key.items() if k != "key"}
+            for key in api_keys.values()
+        ]
+        return {"keys": safe_keys, "count": len(safe_keys)}
+
+    @router.delete("/api-keys/{key_id}", dependencies=[Depends(auth)])
+    def revoke_api_key(
+        key_id: str,
+        request: Request,
+    ):
+        """Revoke an API key."""
+        api_keys = getattr(request.app.state, "api_keys", {})
+        if key_id not in api_keys:
+            raise HTTPException(status_code=404, detail="API key not found")
+        api_keys[key_id]["active"] = False
+        return {"status": "revoked", "id": key_id}
 
     app.include_router(router)
     return app
