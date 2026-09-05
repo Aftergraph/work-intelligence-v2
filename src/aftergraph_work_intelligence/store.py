@@ -93,6 +93,20 @@ CREATE TABLE IF NOT EXISTS intake_transitions (
 );
 CREATE INDEX IF NOT EXISTS idx_intake_transitions_work
 ON intake_transitions(work_item_id, at ASC);
+
+CREATE TABLE IF NOT EXISTS tenant_policies (
+    tenant_id TEXT PRIMARY KEY,
+    allowed_sources_json TEXT NOT NULL DEFAULT '[]',
+    auto_create_work_items INTEGER NOT NULL DEFAULT 1,
+    max_work_items INTEGER NOT NULL DEFAULT 0,
+    max_priority TEXT NOT NULL DEFAULT 'critical',
+    dedupe_threshold REAL NOT NULL DEFAULT 0.72,
+    allow_works INTEGER NOT NULL DEFAULT 0,
+    allowed_destinations_json TEXT,
+    require_approval_for_promotion INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -122,6 +136,110 @@ class SQLiteStore:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    def get_tenant_policy(self, tenant_id: str) -> dict | None:
+        """Return persisted policy for tenant, or None if not found."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM tenant_policies WHERE tenant_id = ?",
+                (tenant_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "tenant_id": row["tenant_id"],
+                "allowed_sources": json.loads(row["allowed_sources_json"]),
+                "auto_create_work_items": bool(row["auto_create_work_items"]),
+                "max_work_items": row["max_work_items"],
+                "max_priority": row["max_priority"],
+                "dedupe_threshold": row["dedupe_threshold"],
+                "allow_works": bool(row["allow_works"]),
+                "allowed_destinations": json.loads(row["allowed_destinations_json"]) if row["allowed_destinations_json"] else None,
+                "require_approval_for_promotion": bool(row["require_approval_for_promotion"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+
+    def upsert_tenant_policy(
+        self,
+        tenant_id: str,
+        allowed_sources: list[str],
+        auto_create_work_items: bool,
+        max_work_items: int,
+        max_priority: str,
+        dedupe_threshold: float,
+        allow_works: bool,
+        allowed_destinations: list[str] | None,
+        require_approval_for_promotion: bool,
+    ) -> None:
+        """Insert or update a tenant policy."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._db.execute(
+                """
+                INSERT INTO tenant_policies
+                (tenant_id, allowed_sources_json, auto_create_work_items,
+                 max_work_items, max_priority, dedupe_threshold, allow_works,
+                 allowed_destinations_json, require_approval_for_promotion,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tenant_id) DO UPDATE SET
+                    allowed_sources_json=excluded.allowed_sources_json,
+                    auto_create_work_items=excluded.auto_create_work_items,
+                    max_work_items=excluded.max_work_items,
+                    max_priority=excluded.max_priority,
+                    dedupe_threshold=excluded.dedupe_threshold,
+                    allow_works=excluded.allow_works,
+                    allowed_destinations_json=excluded.allowed_destinations_json,
+                    require_approval_for_promotion=excluded.require_approval_for_promotion,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    tenant_id,
+                    json.dumps(list(allowed_sources)),
+                    int(auto_create_work_items),
+                    max_work_items,
+                    max_priority,
+                    dedupe_threshold,
+                    int(allow_works),
+                    json.dumps(list(allowed_destinations)) if allowed_destinations is not None else None,
+                    int(require_approval_for_promotion),
+                    now,
+                    now,
+                ),
+            )
+
+    def list_tenant_policies(self) -> list[dict]:
+        """Return all persisted policies."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM tenant_policies ORDER BY tenant_id"
+            ).fetchall()
+            return [
+                {
+                    "tenant_id": row["tenant_id"],
+                    "allowed_sources": json.loads(row["allowed_sources_json"]),
+                    "auto_create_work_items": bool(row["auto_create_work_items"]),
+                    "max_work_items": row["max_work_items"],
+                    "max_priority": row["max_priority"],
+                    "dedupe_threshold": row["dedupe_threshold"],
+                    "allow_works": bool(row["allow_works"]),
+                    "allowed_destinations": json.loads(row["allowed_destinations_json"]) if row["allowed_destinations_json"] else None,
+                    "require_approval_for_promotion": bool(row["require_approval_for_promotion"]),
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+                for row in rows
+            ]
+
+    def delete_tenant_policy(self, tenant_id: str) -> bool:
+        """Delete a tenant policy. Returns True if it existed."""
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM tenant_policies WHERE tenant_id = ?",
+                (tenant_id,),
+            )
+            return cursor.rowcount > 0
 
     def create_observation(self, observation: Observation) -> None:
         with self._lock:

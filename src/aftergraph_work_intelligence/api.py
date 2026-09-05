@@ -591,34 +591,78 @@ def create_app(
     def update_tenant_policy(
         tenant_id: str,
         request: Request,
-        allowed_sources: list[str] | None = None,
-        allowed_destinations: list[str] | None = None,
-        max_work_items: int | None = None,
-        max_priority: str | None = None,
-        allow_works: bool | None = None,
+        allowed_sources: list[str] | None = Query(None),
+        allowed_destinations: list[str] | None = Query(None),
+        max_work_items: int | None = Query(None),
+        max_priority: str | None = Query(None),
+        allow_works: bool | None = Query(None),
+        dedupe_threshold: float | None = Query(None),
+        auto_create_work_items: bool | None = Query(None),
+        require_approval_for_promotion: bool | None = Query(None),
     ):
-        """Update tenant policy."""
+        """Update tenant policy (in-memory + persistent)."""
         policy_store: PolicyStore = request.app.state.policy_store
+        store: SQLiteStore = request.app.state.store
         existing = policy_store.get(tenant_id)
 
-        if existing:
-            policy_store.put(tenant_id, TenantPolicy(
-                allowed_sources=allowed_sources if allowed_sources is not None else existing.allowed_sources,
-                allowed_destinations=allowed_destinations if allowed_destinations is not None else existing.allowed_destinations,
-                max_work_items=max_work_items if max_work_items is not None else existing.max_work_items,
-                max_priority=max_priority if max_priority is not None else existing.max_priority,
-                allow_works=allow_works if allow_works is not None else existing.allow_works,
-            ))
-        else:
-            policy_store.put(tenant_id, TenantPolicy(
-                allowed_sources=set(allowed_sources or []),
-                allowed_destinations=set(allowed_destinations or []),
-                max_work_items=max_work_items or 100,
-                max_priority=max_priority or "high",
-                allow_works=allow_works if allow_works is not None else False,
-            ))
+        # Merge with existing
+        sources = set(allowed_sources) if allowed_sources is not None else (existing.allowed_sources if existing else set())
+        destinations = set(allowed_destinations) if allowed_destinations is not None else (existing.allowed_destinations if existing else None)
+        max_wi = max_work_items if max_work_items is not None else (existing.max_work_items if existing else 100)
+        priority = max_priority or (existing.max_priority if existing else "high")
+        works = allow_works if allow_works is not None else (existing.allow_works if existing else False)
+        threshold = dedupe_threshold if dedupe_threshold is not None else (existing.dedupe_threshold if existing else 0.72)
+        auto_create = auto_create_work_items if auto_create_work_items is not None else (existing.auto_create_work_items if existing else True)
+        require_approval = require_approval_for_promotion if require_approval_for_promotion is not None else (existing.require_approval_for_promotion if existing else True)
 
-        return {"tenant_id": tenant_id, "updated": True}
+        policy = TenantPolicy(
+            allowed_sources=sources,
+            allowed_destinations=destinations,
+            max_work_items=max_wi,
+            max_priority=priority,
+            allow_works=works,
+            dedupe_threshold=threshold,
+            auto_create_work_items=auto_create,
+            require_approval_for_promotion=require_approval,
+        )
+
+        # Update in-memory
+        policy_store.put(tenant_id, policy)
+
+        # Persist to database
+        try:
+            store.upsert_tenant_policy(
+                tenant_id=tenant_id,
+                allowed_sources=list(sources),
+                auto_create_work_items=auto_create,
+                max_work_items=max_wi,
+                max_priority=priority,
+                dedupe_threshold=threshold,
+                allow_works=works,
+                allowed_destinations=list(destinations) if destinations is not None else None,
+                require_approval_for_promotion=require_approval,
+            )
+            persisted = True
+        except Exception:
+            persisted = False
+
+        return {"tenant_id": tenant_id, "updated": True, "persisted": persisted}
+
+    @router.get("/tenants/policies", dependencies=[Depends(auth)])
+    def list_persisted_policies(request: Request):
+        """List all persisted tenant policies."""
+        store: SQLiteStore = request.app.state.store
+        policies = store.list_tenant_policies()
+        return {"policies": policies, "count": len(policies)}
+
+    @router.delete("/tenants/{tenant_id}/policy", dependencies=[Depends(auth)])
+    def delete_persisted_policy(tenant_id: str, request: Request):
+        """Delete a persisted tenant policy."""
+        store: SQLiteStore = request.app.state.store
+        deleted = store.delete_tenant_policy(tenant_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="persisted policy not found")
+        return {"tenant_id": tenant_id, "deleted": True}
 
     @router.get("/readiness", dependencies=[Depends(auth)])
     def readiness(
