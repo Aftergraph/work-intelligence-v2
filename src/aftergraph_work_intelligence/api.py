@@ -28,6 +28,7 @@ from .models import ObservationInput, Publication, utc_now
 from .policy import PolicyStore, TenantPolicy
 from .publishers import Publisher, publisher_from_env
 from .service import WorkIntelligenceService
+from .tasks import create_task_queue, TaskStatus
 from .store import SQLiteStore
 from .transitions import TransitionEngine
 
@@ -236,6 +237,10 @@ def create_app(
         app.state.publisher = configured_publisher
         app.state.metrics = MetricsRecorder(store)
         app.state.evidence_secret = configured_evidence_secret
+        # Initialize background task queue
+        task_queue = create_task_queue()
+        app.state.task_queue = task_queue
+
         try:
             yield
         finally:
@@ -506,6 +511,46 @@ def create_app(
             "total_errors": stats.get("errors", 0),
             "by_path": dict(stats.get("by_path", {})),
             "by_status": dict(stats.get("by_status", {})),
+        }
+
+    @router.post("/tasks/submit", dependencies=[Depends(auth)])
+    def submit_task(request: Request, name: str = Body(...), args: list = Body(default=[]), kwargs: dict = Body(default={})):
+        """Submit a background task."""
+        queue = request.app.state.task_queue
+        task = queue.submit(name, *args, **kwargs)
+        return {"task_id": task.id, "name": task.name, "status": task.status}
+
+    @router.get("/tasks/stats", dependencies=[Depends(auth)])
+    def task_stats(request: Request):
+        """Get task queue statistics."""
+        queue = request.app.state.task_queue
+        return queue.get_stats()
+
+    @router.get("/tasks", dependencies=[Depends(auth)])
+    def list_tasks(request: Request, status: str = Query(None)):
+        """List background tasks."""
+        queue = request.app.state.task_queue
+        task_status = TaskStatus(status) if status else None
+        tasks = queue.list_tasks(status=task_status)
+        return [{"id": t.id, "name": t.name, "status": t.status} for t in tasks]
+
+    @router.get("/tasks/{task_id}", dependencies=[Depends(auth)])
+    def get_task_status(request: Request, task_id: str):
+        """Get task status."""
+        queue = request.app.state.task_queue
+        task = queue.get_task(task_id)
+        if not task:
+            return JSONResponse(status_code=404, content={"detail": "Task not found"})
+        return {
+            "id": task.id,
+            "name": task.name,
+            "status": task.status,
+            "result": task.result,
+            "error": task.error,
+            "created_at": task.created_at,
+            "started_at": task.started_at,
+            "completed_at": task.completed_at,
+            "retries": task.retries,
         }
 
     @router.get("/webhooks/stats", dependencies=[Depends(auth)])
