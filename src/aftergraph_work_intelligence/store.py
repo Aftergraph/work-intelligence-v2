@@ -66,6 +66,19 @@ CREATE TABLE IF NOT EXISTS intake_publications (
 );
 CREATE INDEX IF NOT EXISTS idx_intake_publications_work
 ON intake_publications(work_item_id, published_at DESC);
+
+CREATE TABLE IF NOT EXISTS intake_transitions (
+    id TEXT PRIMARY KEY,
+    work_item_id TEXT NOT NULL REFERENCES intake_work_items(id) ON DELETE CASCADE,
+    from_state TEXT NOT NULL,
+    to_state TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    resume_at TEXT,
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_intake_transitions_work
+ON intake_transitions(work_item_id, at ASC);
 """
 
 
@@ -215,7 +228,7 @@ class SQLiteStore:
             rows = self._db.execute(
                 """
                 SELECT * FROM intake_work_items
-                WHERE tenant_id = ? AND status NOT IN ('DONE', 'CANCELLED')
+                WHERE tenant_id = ? AND status NOT IN ('DONE', 'CANCELLED', 'SNOOZED', 'REJECTED')
                 ORDER BY updated_at DESC LIMIT ?
                 """,
                 (tenant_id, max(1, min(limit, 1000))),
@@ -227,7 +240,7 @@ class SQLiteStore:
             row = self._db.execute(
                 """
                 SELECT COUNT(*) AS n FROM intake_work_items
-                WHERE tenant_id = ? AND status NOT IN ('DONE', 'CANCELLED')
+                WHERE tenant_id = ? AND status NOT IN ('DONE', 'CANCELLED', 'SNOOZED', 'REJECTED')
                 """,
                 (tenant_id,),
             ).fetchone()
@@ -314,6 +327,64 @@ class SQLiteStore:
                 (work_item_id,),
             ).fetchall()
         return [self._publication(row) for row in rows]
+
+    def write_transition(self, transition, new_status: str, updated_at) -> None:
+        # Local import to avoid circular import (transitions imports models).
+        from .transitions import _iso as _t_iso  # type: ignore
+
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    """
+                    INSERT INTO intake_transitions
+                    (id, work_item_id, from_state, to_state, actor, reason, resume_at, at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        transition.id,
+                        transition.work_item_id,
+                        transition.from_state,
+                        transition.to_state,
+                        transition.actor,
+                        transition.reason,
+                        _t_iso(transition.resume_at) if transition.resume_at is not None else None,
+                        _t_iso(transition.at),
+                    ),
+                )
+                self._db.execute(
+                    "UPDATE intake_work_items SET status = ?, updated_at = ? WHERE id = ?",
+                    (new_status, _t_iso(updated_at), transition.work_item_id),
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+
+    def list_transitions(self, work_item_id: str) -> list:
+        from .transitions import Transition, _dt  # type: ignore
+
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM intake_transitions WHERE work_item_id = ? ORDER BY at ASC",
+                (work_item_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            resume_at = _dt(row["resume_at"]) if row["resume_at"] else None
+            result.append(
+                Transition(
+                    id=row["id"],
+                    work_item_id=row["work_item_id"],
+                    from_state=row["from_state"],
+                    to_state=row["to_state"],
+                    actor=row["actor"],
+                    reason=row["reason"],
+                    at=_dt(row["at"]),
+                    resume_at=resume_at,
+                )
+            )
+        return result
 
     @staticmethod
     def _observation(row: sqlite3.Row) -> Observation:
