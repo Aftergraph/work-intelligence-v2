@@ -133,30 +133,56 @@ class RateLimiter:
         self.default_limit = requests_per_minute
         self.requests: dict[str, list[float]] = defaultdict(list)
         self.key_limits: dict[str, int] = {}  # per-key overrides
+        self.endpoint_limits: dict[str, int] = {}  # per-endpoint overrides
+        self._endpoint_requests: dict[str, list[float]] = defaultdict(list)
 
     def set_key_limit(self, key: str, limit: int) -> None:
         """Set a custom rate limit for a specific key."""
         self.key_limits[key] = limit
 
+    def set_endpoint_limit(self, endpoint: str, limit: int) -> None:
+        """Set a rate limit for a specific endpoint."""
+        self.endpoint_limits[endpoint] = limit
+
     def get_limit(self, key: str) -> int:
         """Get the rate limit for a key."""
         return self.key_limits.get(key, self.default_limit)
 
-    def is_allowed(self, client_id: str) -> bool:
+    def is_allowed(self, client_id: str, endpoint: str | None = None) -> bool:
         now = time.time()
         window_start = now - 60
 
-        # Clean old requests
+        # Check global/key limit
         self.requests[client_id] = [t for t in self.requests[client_id] if t > window_start]
-
-        # Check limit
         limit = self.get_limit(client_id)
         if len(self.requests[client_id]) >= limit:
             return False
 
+        # Check endpoint-specific limit
+        if endpoint and endpoint in self.endpoint_limits:
+            ep_key = f"{client_id}:{endpoint}"
+            self._endpoint_requests[ep_key] = [t for t in self._endpoint_requests[ep_key] if t > window_start]
+            ep_limit = self.endpoint_limits[endpoint]
+            if len(self._endpoint_requests[ep_key]) >= ep_limit:
+                return False
+            self._endpoint_requests[ep_key].append(now)
+
         # Record new request
         self.requests[client_id].append(now)
         return True
+
+    def get_endpoint_usage(self, client_id: str, endpoint: str) -> dict:
+        """Get usage stats for a specific endpoint."""
+        now = time.time()
+        window_start = now - 60
+        ep_key = f"{client_id}:{endpoint}"
+        self._endpoint_requests[ep_key] = [t for t in self._endpoint_requests[ep_key] if t > window_start]
+        limit = self.endpoint_limits.get(endpoint, self.default_limit)
+        return {
+            "used": len(self._endpoint_requests[ep_key]),
+            "limit": limit,
+            "remaining": max(0, limit - len(self._endpoint_requests[ep_key])),
+        }
 
     def get_usage(self, client_id: str) -> dict:
         """Get current usage stats for a client."""
