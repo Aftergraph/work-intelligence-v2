@@ -212,7 +212,8 @@ class TestBulkOperations:
 
         # Check status of multiple items
         resp = c.post(
-            f"/v1/work-items/bulk-status?tenant_id=tenant-bulk&work_item_ids={ids[0]}&work_item_ids={ids[1]}&work_item_ids={ids[2]}",
+            "/v1/work-items/bulk-status",
+            json={"work_item_ids": ids, "tenant_id": "tenant-bulk"},
             headers={"Authorization": "Bearer test-token"},
         )
         assert resp.status_code == 200
